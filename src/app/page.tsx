@@ -5,7 +5,18 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { YourDataTable } from '@/components/your-data-table';
 import EditDialog from '@/components/edit-dialog';
-import { Contact } from '@/components/columns'; // Import the Contact type
+import { Contact } from '@/components/columns';
+// NEW: Import AlertDialog components
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
+
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
@@ -14,9 +25,10 @@ export default function Home() {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
-
-  // NEW: State to track which row we are editing
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  
+  // NEW: State to control the "Not Found" dialog
+  const [isNotFoundDialogOpen, setIsNotFoundDialogOpen] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -44,9 +56,19 @@ export default function Home() {
     try {
       const response = await fetch('/api/ocr', { method: 'POST', body: formData });
       const data = await response.json();
+
       if (response.ok) {
-        setExtractedInfo(data);
-        setIsDialogOpen(true);
+        // ================== UPDATED LOGIC HERE ==================
+        // Check if the returned data array is empty
+        if (Array.isArray(data) && data.length > 0) {
+          // If we have contacts, open the normal edit dialog
+          setExtractedInfo(data);
+          setIsDialogOpen(true);
+        } else {
+          // If data is empty, open our new "Not Found" dialog instead
+          setIsNotFoundDialogOpen(true);
+        }
+        // ==========================================================
       } else {
         alert(`Error: ${data.error || 'An unknown error occurred.'}`);
       }
@@ -57,32 +79,26 @@ export default function Home() {
     }
   };
 
-  // UPDATED: handleSave now knows about editing vs. adding
   const handleSave = (data: Contact[]) => {
     if (editingIndex !== null) {
-      // We are editing an existing row
       const updatedTableData = [...tableData];
-      updatedTableData[editingIndex] = data[0]; // Assuming edit dialog saves one contact
+      updatedTableData[editingIndex] = data[0];
       setTableData(updatedTableData);
-      setEditingIndex(null); // Reset editing index
+      setEditingIndex(null);
     } else {
-      // We are adding new rows from an OCR scan
       setTableData((prevData) => [...prevData, ...data]);
     }
     setIsDialogOpen(false);
   };
 
-  // NEW: Function to handle deleting a row
   const handleDeleteRow = (index: number) => {
     if (confirm('Are you sure you want to delete this contact?')) {
       setTableData((prevData) => prevData.filter((_, i) => i !== index));
     }
   };
 
-  // NEW: Function to handle editing a row
   const handleEditRow = (index: number, contact: Contact) => {
     setEditingIndex(index);
-      // The edit dialog expects an array, so we wrap the contact in one
     setExtractedInfo([contact]);
     setIsDialogOpen(true);
   };
@@ -124,8 +140,8 @@ export default function Home() {
             </div>
           </div>
         )}
-
-        {/* UPDATED: Pass the new handler functions to the data table */}
+        
+        <h2 className="text-2xl font-semibold mb-4">Saved Contacts</h2>
         <YourDataTable 
           data={tableData} 
           handleDeleteRow={handleDeleteRow}
@@ -138,6 +154,23 @@ export default function Home() {
           data={extractedInfo}
           onSave={handleSave}
         />
+        
+        {/* ================== NEW "NOT FOUND" DIALOG ================== */}
+        <AlertDialog open={isNotFoundDialogOpen} onOpenChange={setIsNotFoundDialogOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>No Contacts Found</AlertDialogTitle>
+              <AlertDialogDescription>
+                We could not detect a name or phone number in the uploaded image. Please try a different image or one with clearer text.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogAction>OK</AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+        {/* ============================================================= */}
+
       </div>
     </main>
   );
