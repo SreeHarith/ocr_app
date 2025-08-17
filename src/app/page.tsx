@@ -6,7 +6,6 @@ import { Input } from '@/components/ui/input';
 import { YourDataTable } from '@/components/your-data-table';
 import EditDialog from '@/components/edit-dialog';
 import { Contact } from '@/components/columns';
-// NEW: Import AlertDialog components
 import {
   AlertDialog,
   AlertDialogAction,
@@ -16,6 +15,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
+import { CSVLink } from 'react-csv';
+import { Download } from 'lucide-react';
 
 
 export default function Home() {
@@ -26,9 +27,26 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
-  
-  // NEW: State to control the "Not Found" dialog
   const [isNotFoundDialogOpen, setIsNotFoundDialogOpen] = useState(false);
+
+  const csvHeaders = [
+    { label: "Name", key: "name" },
+    { label: "Phone Number", key: "phone" },
+    { label: "Gender", key: "gender" }
+  ];
+
+  // ================== NEW FUNCTION TO PREPARE CSV DATA ==================
+  /**
+   * Prepares data for CSV export. It prepends a tab character (\t) to phone numbers
+   * to prevent spreadsheet programs from converting them to scientific notation.
+   */
+  const getCSVData = () => {
+    return tableData.map(contact => ({
+      ...contact,
+      phone: `\t${contact.phone}`
+    }));
+  };
+  // ======================================================================
 
   useEffect(() => {
     return () => {
@@ -36,6 +54,7 @@ export default function Home() {
     };
   }, [imagePreviewUrl]);
 
+  // ... (all other functions like handleFileChange, handleExtractClick, etc. are unchanged)
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
     const newFile = event.target.files?.[0];
@@ -56,19 +75,13 @@ export default function Home() {
     try {
       const response = await fetch('/api/ocr', { method: 'POST', body: formData });
       const data = await response.json();
-
       if (response.ok) {
-        // ================== UPDATED LOGIC HERE ==================
-        // Check if the returned data array is empty
         if (Array.isArray(data) && data.length > 0) {
-          // If we have contacts, open the normal edit dialog
           setExtractedInfo(data);
           setIsDialogOpen(true);
         } else {
-          // If data is empty, open our new "Not Found" dialog instead
           setIsNotFoundDialogOpen(true);
         }
-        // ==========================================================
       } else {
         alert(`Error: ${data.error || 'An unknown error occurred.'}`);
       }
@@ -102,6 +115,7 @@ export default function Home() {
     setExtractedInfo([contact]);
     setIsDialogOpen(true);
   };
+
 
   return (
     <main className="container mx-auto p-4 md:p-8">
@@ -141,7 +155,22 @@ export default function Home() {
           </div>
         )}
         
-        <h2 className="text-2xl font-semibold mb-4">Saved Contacts</h2>
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-2xl font-semibold">Saved Contacts</h2>
+          {tableData.length > 0 && (
+            // UPDATED: Use the new function to get the data
+            <CSVLink 
+              data={getCSVData()} 
+              headers={csvHeaders}
+              filename={"contacts.csv"}
+              className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-secondary text-secondary-foreground hover:bg-secondary/80 h-10 px-4 py-2"
+            >
+              <Download className="mr-2 h-4 w-4" />
+              Download CSV
+            </CSVLink>
+          )}
+        </div>
+        
         <YourDataTable 
           data={tableData} 
           handleDeleteRow={handleDeleteRow}
@@ -155,22 +184,19 @@ export default function Home() {
           onSave={handleSave}
         />
         
-        {/* ================== NEW "NOT FOUND" DIALOG ================== */}
         <AlertDialog open={isNotFoundDialogOpen} onOpenChange={setIsNotFoundDialogOpen}>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>No Contacts Found</AlertDialogTitle>
-              <AlertDialogDescription>
-                We could not detect a name or phone number in the uploaded image. Please try a different image or one with clearer text.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogAction>OK</AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
-        {/* ============================================================= */}
-
+  <AlertDialogContent>
+    <AlertDialogHeader>
+      <AlertDialogTitle>No Contacts Found</AlertDialogTitle>
+      <AlertDialogDescription>
+        We could not detect a name or phone number in the uploaded image. Please try a different image or one with clearer text.
+      </AlertDialogDescription>
+    </AlertDialogHeader>
+    <AlertDialogFooter>
+      <AlertDialogAction>OK</AlertDialogAction>
+    </AlertDialogFooter>
+  </AlertDialogContent>
+</AlertDialog>
       </div>
     </main>
   );

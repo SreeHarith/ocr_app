@@ -1,12 +1,13 @@
 "use client"
 
 import { ColumnDef } from "@tanstack/react-table"
-import { Button } from "@/components/ui/button" // Import Button
-import { Edit, Trash2 } from "lucide-react" // Import icons
+import { Button } from "@/components/ui/button"
+import { Edit, Trash2 } from "lucide-react"
 
 export type Contact = {
   name: string
   phone: string
+  gender: string // Add gender field
 }
 
 export const columns: ColumnDef<Contact>[] = [
@@ -18,13 +19,22 @@ export const columns: ColumnDef<Contact>[] = [
     accessorKey: "phone",
     header: "Phone Number",
   },
-  // ==================  NEW ACTION COLUMN  ==================
+  // NEW GENDER COLUMN
+  {
+    accessorKey: "gender",
+    header: "Gender",
+    cell: ({ row }) => {
+      const gender = row.getValue("gender") as string;
+      // Capitalize the first letter for display
+      return <div className="capitalize">{gender}</div>;
+    },
+  },
   {
     id: "actions",
     header: () => <div className="text-right">Actions</div>,
     cell: ({ row, table }) => {
+      // ... (action cell code is unchanged)
       const contact = row.original
-
       return (
         <div className="text-right">
           <Button
@@ -48,5 +58,4 @@ export const columns: ColumnDef<Contact>[] = [
       )
     },
   },
-  // ==========================================================
 ]
