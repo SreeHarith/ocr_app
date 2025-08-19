@@ -1,33 +1,30 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// This function will call the Gender-API for a single name
+// Function to call the Gender-API.com API
 async function getGender(name: string, apiKey: string) {
-  // We only use the first name for better accuracy
   const firstName = name.split(' ')[0];
   try {
     const response = await fetch(`https://gender-api.com/get?name=${firstName}&key=${apiKey}`);
     const data = await response.json();
-    // The API returns 'male', 'female', or 'unknown'
-    return data.gender || 'unknown'; 
+    if (data.errno) {
+      console.error("Gender-API.com Error:", data.errmsg);
+      return 'unknown';
+    }
+    return data.gender || 'unknown';
   } catch (error) {
-    console.error("Gender API call failed:", error);
-    return 'unknown'; // Return a default value on failure
+    console.error("Gender-API.com call failed:", error);
+    return 'unknown';
   }
 }
 
 export async function POST(request: NextRequest) {
-  const formData = await request.formData();
-  const file = formData.get('file') as File;
+  // This route now expects a JSON body with an `imageUrl`.
+  const { imageUrl } = await request.json();
   const genderApiKey = process.env.GENDER_API_KEY!;
-
-  if (!file) {
-    return NextResponse.json({ error: 'No file provided' }, { status: 400 });
+  console.log("URL being sent to OCR AI:", imageUrl);
+  if (!imageUrl) {
+    return NextResponse.json({ error: 'No image URL provided' }, { status: 400 });
   }
-
-  // ... (code for base64 conversion is the same)
-  const buffer = await file.arrayBuffer();
-  const base64Image = Buffer.from(buffer).toString('base64');
-  const mimeType = file.type;
 
   try {
     const ocrResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -44,23 +41,27 @@ export async function POST(request: NextRequest) {
             content: [
               {
                 type: 'text',
-                text: 'You are an expert OCR system. Analyze the entire image and find ALL names and phone numbers. You MUST return ONLY a single, clean JSON array. Each object in the array must have two keys: "name" and "phone". Example: [{"name": "John Doe", "phone": "111-222-3333"}]',
+                text: 'You are an expert OCR system. Analyze the entire image and find ALL names and phone numbers. You MUST return ONLY a single, clean JSON array. Each object must have two keys: "name" and "phone". Example: [{"name": "John Doe", "phone": "111-222-3300"}]',
               },
-              { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64Image}` } },
+              // The AI is now given the public URL of the image on Cloudinary.
+              { type: 'image_url', image_url: { url: imageUrl } },
             ],
           },
         ],
       }),
     });
 
-    if (!ocrResponse.ok) throw new Error(`OCR API call failed`);
-
     const ocrData = await ocrResponse.json();
+
+    if (!ocrResponse.ok || !ocrData.choices || ocrData.choices.length === 0) {
+      console.error("OCR API Error Response:", ocrData);
+      throw new Error(`OCR API call failed. Response: ${JSON.stringify(ocrData)}`);
+    }
+
     const content = ocrData.choices[0].message.content;
     const jsonString = content.match(/```json\n([\s\S]*?)\n```/)?.[1] || content;
     const contacts: { name: string; phone: string }[] = JSON.parse(jsonString);
 
-    // NEW: Get gender for each contact
     const contactsWithGender = await Promise.all(
       contacts.map(async (contact) => {
         const gender = await getGender(contact.name, genderApiKey);

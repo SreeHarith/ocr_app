@@ -35,18 +35,12 @@ export default function Home() {
     { label: "Gender", key: "gender" }
   ];
 
-  // ================== NEW FUNCTION TO PREPARE CSV DATA ==================
-  /**
-   * Prepares data for CSV export. It prepends a tab character (\t) to phone numbers
-   * to prevent spreadsheet programs from converting them to scientific notation.
-   */
   const getCSVData = () => {
     return tableData.map(contact => ({
       ...contact,
       phone: `\t${contact.phone}`
     }));
   };
-  // ======================================================================
 
   useEffect(() => {
     return () => {
@@ -54,7 +48,6 @@ export default function Home() {
     };
   }, [imagePreviewUrl]);
 
-  // ... (all other functions like handleFileChange, handleExtractClick, etc. are unchanged)
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
     const newFile = event.target.files?.[0];
@@ -68,25 +61,51 @@ export default function Home() {
   };
 
   const handleExtractClick = async () => {
-    if (!file) return;
+    if (!file) {
+      alert('Please select a file first.');
+      return;
+    }
     setIsLoading(true);
-    const formData = new FormData();
-    formData.append('file', file);
+
     try {
-      const response = await fetch('/api/ocr', { method: 'POST', body: formData });
-      const data = await response.json();
-      if (response.ok) {
-        if (Array.isArray(data) && data.length > 0) {
-          setExtractedInfo(data);
-          setIsDialogOpen(true);
-        } else {
-          setIsNotFoundDialogOpen(true);
-        }
-      } else {
-        alert(`Error: ${data.error || 'An unknown error occurred.'}`);
+      // Step 1: Upload the image file to our backend, which forwards it to Cloudinary.
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const uploadResponse = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const uploadData = await uploadResponse.json();
+      if (!uploadResponse.ok) {
+        throw new Error(uploadData.error || 'Failed to upload image.');
       }
-    } catch (error) {
-      console.error('An error occurred:', error);
+      
+      const imageUrl = uploadData.url;
+
+      // Step 2: Send the public image URL to the OCR API.
+      const ocrResponse = await fetch('/api/ocr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageUrl }), // Send the URL in the body
+      });
+
+      const ocrData = await ocrResponse.json();
+      if (!ocrResponse.ok) {
+        throw new Error(ocrData.error || 'Failed to process image with OCR.');
+      }
+
+      if (Array.isArray(ocrData) && ocrData.length > 0) {
+        setExtractedInfo(ocrData);
+        setIsDialogOpen(true);
+      } else {
+        setIsNotFoundDialogOpen(true);
+      }
+
+    } catch (error: any) {
+      console.error('An error occurred during extraction:', error);
+      alert(`An error occurred: ${error.message}`);
     } finally {
       setIsLoading(false);
     }
@@ -115,7 +134,6 @@ export default function Home() {
     setExtractedInfo([contact]);
     setIsDialogOpen(true);
   };
-
 
   return (
     <main className="container mx-auto p-4 md:p-8">
@@ -158,7 +176,6 @@ export default function Home() {
         <div className="flex justify-between items-center mb-4">
           <h2 className="text-2xl font-semibold">Saved Contacts</h2>
           {tableData.length > 0 && (
-            // UPDATED: Use the new function to get the data
             <CSVLink 
               data={getCSVData()} 
               headers={csvHeaders}
@@ -185,18 +202,18 @@ export default function Home() {
         />
         
         <AlertDialog open={isNotFoundDialogOpen} onOpenChange={setIsNotFoundDialogOpen}>
-  <AlertDialogContent>
-    <AlertDialogHeader>
-      <AlertDialogTitle>No Contacts Found</AlertDialogTitle>
-      <AlertDialogDescription>
-        We could not detect a name or phone number in the uploaded image. Please try a different image or one with clearer text.
-      </AlertDialogDescription>
-    </AlertDialogHeader>
-    <AlertDialogFooter>
-      <AlertDialogAction>OK</AlertDialogAction>
-    </AlertDialogFooter>
-  </AlertDialogContent>
-</AlertDialog>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>No Contacts Found</AlertDialogTitle>
+              <AlertDialogDescription>
+                We could not detect a name or phone number in the uploaded image. Please try a different image or one with clearer text.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogAction>OK</AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
     </main>
   );
