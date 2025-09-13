@@ -21,7 +21,6 @@ export async function POST(request: NextRequest) {
   const bytes = Buffer.from(buffer);
 
   try {
-    // Upload the image to Cloudinary. We're using a Promise to handle the stream.
     const result: any = await new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
         {
@@ -30,7 +29,10 @@ export async function POST(request: NextRequest) {
           transformation: [
             { width: 1200, height: 1200, crop: 'limit' },
             { format: 'jpg', quality: 'auto:good' }
-          ]
+          ],
+          // ================== ADD THIS LINE ==================
+          eager: true, // This tells Cloudinary to process the image immediately.
+          // ===================================================
         },
         (error, result) => {
           if (error) {
