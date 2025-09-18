@@ -1,330 +1,234 @@
 "use client"
 
-import { useEffect, useState } from "react"
-import React from "react" // Import React for Fragments
+import { useEffect, useState, ReactNode } from "react"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Input } from "@/components/ui/input"
-import { Trash2, PlusCircle, AlertCircle } from "lucide-react"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Trash2, PlusCircle, AlertCircle, CheckCircle, Copy, Info } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { parsePhoneNumberFromString, CountryCode } from "libphonenumber-js"
+import { Contact } from "./columns"
 
-interface ContactInfo {
-  name: string;
-  phone: string;
-  gender: string;
-}
+type DialogMode = 'csv' | 'ocr' | 'edit';
 
 interface EditDialogProps {
   isOpen: boolean;
   setIsOpen: (isOpen: boolean) => void;
-  data: ContactInfo[];
-  onSave: (data: ContactInfo[]) => void;
-}
-
-interface DuplicateInfo {
-  isDuplicate: boolean;
-  originalIndex: number | null;
+  data: Contact[];
+  onSave: (data: Contact[]) => void;
+  mode: DialogMode;
 }
 
 const DEFAULT_COUNTRY: CountryCode = "IN";
-type AcceptType = string;
-const ACCEPT_TYPE: AcceptType = "any";
 
-const normalizeAndParse = (raw: string, country?: CountryCode) => {
-  const input = raw?.trim() ?? "";
-  if (!input) return { parsed: null as ReturnType<typeof parsePhoneNumberFromString> | null, normalized: "" };
-  const parsedIntl = parsePhoneNumberFromString(input);
-  if (parsedIntl) return { parsed: parsedIntl, normalized: parsedIntl.number };
-  const parsedWithCountry = parsePhoneNumberFromString(input, country || DEFAULT_COUNTRY);
-  if (parsedWithCountry) return { parsed: parsedWithCountry, normalized: parsedWithCountry.number };
-  const justDigitsPlus = input.replace(/[^\d+]/g, "");
-  const retryIntl = parsePhoneNumberFromString(justDigitsPlus);
-  if (retryIntl) return { parsed: retryIntl, normalized: retryIntl.number };
-  const retryCountry = parsePhoneNumberFromString(justDigitsPlus, country || DEFAULT_COUNTRY);
-  if (retryCountry) return { parsed: retryCountry, normalized: retryCountry.number };
-  return { parsed: null, normalized: "" };
+const toE164 = (raw: string, country?: CountryCode): string => {
+  const parsed = parsePhoneNumberFromString(raw?.trim() ?? "", country || DEFAULT_COUNTRY);
+  return parsed?.number ?? (raw?.trim() ?? "");
 };
 
-// ================== UPDATED VALIDATION FUNCTION ==================
-const getValidationError = (raw: string, country?: CountryCode): string | null => {
-  if (!raw || !raw.trim()) return null;
-
-  const { parsed } = normalizeAndParse(raw, country);
-
-  if (!parsed) {
-    return "Invalid phone number format";
+// ====================== THE FIX IS HERE ======================
+// The stricter validation for Indian mobile numbers is added back.
+const getValidationError = (name: string, phone: string): string | null => {
+  if (!name || !name.trim()) return "Name is required.";
+  if (!phone || !phone.trim()) return "Phone is required.";
+  
+  const parsed = parsePhoneNumberFromString(phone, DEFAULT_COUNTRY);
+  
+  if (!parsed || !parsed.isValid()) {
+    return "Invalid phone number format.";
   }
 
-  // 1. General validation by the library
-  if (!parsed.isValid()) {
-    return "Invalid phone number";
-  }
-
-  // 2. Stricter custom rule for India
+  // Stricter rule for Indian mobile numbers
   if (parsed.country === 'IN') {
-    const nationalNumber = parsed.nationalNumber;
-    // Valid Indian numbers must be 10 digits and start with 6, 7, 8, or 9.
-    if (!/^[6789]\d{9}$/.test(nationalNumber)) {
-      return "Invalid Indian number";
-    }
-  }
-
-  // 3. Mobile-only check (if enabled)
-  if (ACCEPT_TYPE === "mobile") {
-    const t: string | undefined = parsed.getType?.();
-    if (t && t !== "MOBILE" && t !== "FIXED_LINE_OR_MOBILE") {
-      return "Must be a mobile number";
+    // Valid Indian mobile numbers are 10 digits long and must start with 6, 7, 8, or 9.
+    if (!/^[6789]\d{9}$/.test(parsed.nationalNumber)) {
+      return "Invalid Indian mobile number.";
     }
   }
 
   return null;
 };
-// =================================================================
+// =============================================================
 
-const toE164 = (raw: string, country?: CountryCode): string => {
-  const { parsed } = normalizeAndParse(raw, country);
-  return parsed?.number ?? (raw?.trim() ?? "");
-};
+export default function EditDialog({ isOpen, setIsOpen, data, onSave, mode }: EditDialogProps) {
+  const [editedData, setEditedData] = useState<Contact[]>([]);
+  const [selectedRows, setSelectedRows] = useState<Record<number, boolean>>({});
 
-export default function EditDialog({ isOpen, setIsOpen, data, onSave }: EditDialogProps) {
-  const [editedData, setEditedData] = useState<ContactInfo[]>([]);
-  const [validationErrors, setValidationErrors] = useState<Record<number, string>>({});
+  const runInternalValidation = (contacts: Contact[]): Contact[] => {
+    const seenPhones = new Set<string>();
+    return contacts.map(contact => {
+      if (contact.status === 'duplicate' && contact.message?.includes('Exists in DB')) {
+        seenPhones.add(toE164(contact.phone));
+        return contact;
+      }
+      
+      const phoneE164 = toE164(contact.phone);
+      const validationError = getValidationError(contact.name, contact.phone);
+
+      if (validationError) {
+        return { ...contact, status: 'invalid', message: validationError };
+      }
+      
+      if (phoneE164 && seenPhones.has(phoneE164)) {
+          return { ...contact, status: 'duplicate', message: 'Duplicate within this list.' };
+      }
+      
+      if(phoneE164) seenPhones.add(phoneE164);
+      
+      return { ...contact, status: 'new', message: 'Ready to save.' };
+    });
+  };
 
   useEffect(() => {
     if (data) {
-      setEditedData(data);
-      validateAllPhones(data);
-    }
-  }, [data]);
+        const processedData = runInternalValidation(data);
+        setEditedData(processedData);
 
-  const validatePhone = (phone: string, index: number, country?: CountryCode) => {
-    const error = getValidationError(phone, country);
-    if (error) {
-      setValidationErrors(prev => ({ ...prev, [index]: error }));
-    } else {
-      setValidationErrors(prev => {
-        const next = { ...prev };
-        delete next[index];
-        return next;
-      });
+        const initialSelection: Record<number, boolean> = {};
+        if (mode === 'csv') {
+            processedData.forEach((contact, index) => {
+            if (contact.status === 'new') initialSelection[index] = true;
+            });
+        }
+        setSelectedRows(initialSelection);
     }
-  };
-
-  const validateAllPhones = (contacts: ContactInfo[]) => {
-    const errors: Record<number, string> = {};
-    contacts.forEach((contact, index) => {
-      const error = getValidationError(contact.phone);
-      if (error) errors[index] = error;
-    });
-    setValidationErrors(errors);
-  };
+  }, [data, mode]);
 
   const handleInputChange = (index: number, field: 'name' | 'phone' | 'gender', value: string) => {
-    const updated = [...editedData];
-    // @ts-ignore
-    updated[index][field] = value;
-    setEditedData(updated);
-    if (field === 'phone') {
-      validatePhone(value, index);
-    }
+    setEditedData(prevData => {
+      const updated = [...prevData];
+      updated[index] = { ...updated[index], [field]: value };
+      return runInternalValidation(updated);
+    });
   };
-
+  
   const removeContact = (index: number) => {
-    const next = editedData.filter((_, i) => i !== index);
-    setEditedData(next);
-    validateAllPhones(next);
+    setEditedData(prev => runInternalValidation(prev.filter((_, i) => i !== index)));
   };
 
   const addContact = () => {
-    setEditedData([
-      ...editedData,
-      { name: "", phone: "", gender: "unknown" },
-    ]);
-  };
-
-  const getDuplicateInfo = (currentIndex: number): DuplicateInfo => {
-    const currentContact = editedData[currentIndex];
-    const currentPhone = currentContact.phone.trim();
-    if (!currentPhone) return { isDuplicate: false, originalIndex: null };
-    const currentE164 = toE164(currentPhone);
-    for (let i = 0; i < currentIndex; i++) {
-      const prevContact = editedData[i];
-      const prevE164 = toE164(prevContact.phone);
-      if (prevE164 && currentE164 && prevE164 === currentE164) {
-        return { isDuplicate: true, originalIndex: i };
-      }
-    }
-    return { isDuplicate: false, originalIndex: null };
-  };
+    const newContact: Contact = { name: "", phone: "", gender: "unknown", status: 'invalid', message: 'Name is required.' };
+    setEditedData(prev => [...prev, newContact]);
+  }
 
   const handleSaveClick = () => {
-    if (Object.keys(validationErrors).length > 0) {
-      alert("Please fix the invalid phone numbers before saving.");
-      return;
-    }
-    const hasDuplicates = editedData.some((_, index) => getDuplicateInfo(index).isDuplicate);
-    if (hasDuplicates) {
-      if (!confirm("Duplicate phone numbers were found. Are you sure you want to save?")) {
+    if (mode === 'csv') {
+      const dataToSave = editedData.filter((_, index) => selectedRows[index]);
+      onSave(dataToSave);
+    } else {
+      if (editedData.some(c => c.status === 'invalid')) {
+        alert("Please fix all invalid contacts before saving.");
         return;
       }
+      const dataToSave = editedData.filter(c => c.status !== 'duplicate');
+      onSave(dataToSave);
     }
-    const finalData = editedData
-      .map(c => ({
-        ...c,
-        phone: toE164(c.phone),
-      }))
-      .filter(contact => contact.name.trim() !== "" || contact.phone.trim() !== "");
-    onSave(finalData);
+  };
+  
+  const handleRemoveDuplicates = () => {
+    setEditedData(prev => prev.filter(c => c.status !== 'duplicate'));
   };
 
-  const handleDeleteDuplicates = () => {
-    const nonDuplicates = editedData.filter((_, index) => !getDuplicateInfo(index).isDuplicate);
-    setEditedData(nonDuplicates);
-    validateAllPhones(nonDuplicates);
+  const handleRemoveInvalids = () => {
+    setEditedData(prev => prev.filter(c => c.status !== 'invalid'));
   };
 
-  const hasDuplicates = editedData.some((_, index) => getDuplicateInfo(index).isDuplicate);
+  const getStatusIcon = (status?: string): ReactNode => {
+    switch (status) {
+      case 'new': return <CheckCircle className="h-4 w-4 text-green-500" />;
+      case 'duplicate': return <Copy className="h-4 w-4 text-yellow-500" />;
+      case 'invalid': return <AlertCircle className="h-4 w-4 text-red-500" />;
+      default: return null;
+    }
+  };
+  
+  const getRowClass = (status?: string): string => {
+    if (status === 'duplicate') return "bg-yellow-50 dark:bg-yellow-900/20";
+    if (status === 'invalid') return "bg-red-50 dark:bg-red-900/20";
+    return "";
+  };
+  
+  const hasDuplicates = editedData.some(c => c.status === 'duplicate');
+  const hasInvalids = editedData.some(c => c.status === 'invalid');
 
   return (
     <Dialog open={isOpen} onOpenChange={setIsOpen}>
-      <DialogContent className="sm:max-w-3xl">
-        <TooltipProvider>
-          <DialogHeader>
-            <DialogTitle>Verify Information</DialogTitle>
-            <DialogDescription>
-              Review and edit contacts. The AI has predicted the gender.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="max-h-[60vh] overflow-y-auto pr-2">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Phone Number</TableHead>
-                  <TableHead>Gender</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
+      <DialogContent className="sm:max-w-4xl">
+        <DialogHeader>
+          <DialogTitle>Verify Information</DialogTitle>
+          <DialogDescription>
+            {mode === 'csv' && "Review contacts from your CSV. Only selected rows will be imported."}
+            {mode === 'ocr' && "Review contacts from the image. Duplicates and invalid rows will not be saved."}
+            {mode === 'edit' && "Edit the contact's details before saving."}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="max-h-[60vh] overflow-y-auto pr-2">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                {mode === 'csv' && <TableHead className="w-[50px]"><Checkbox 
+                  onCheckedChange={(checked) => {
+                      const newSelection: Record<number, boolean> = {};
+                      if(checked) editedData.forEach((c, i) => { if(c.status === 'new') newSelection[i] = true; });
+                      setSelectedRows(newSelection);
+                  }}
+                /></TableHead>}
+                <TableHead>Name</TableHead>
+                <TableHead>Phone Number</TableHead>
+                <TableHead>Gender</TableHead>
+                {(mode !== 'edit') && <TableHead>Status</TableHead>}
+                {(mode !== 'csv') && <TableHead className="text-right">Actions</TableHead>}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {editedData.map((contact, index) => (
+                <TableRow key={index} className={cn(getRowClass(contact.status))}>
+                  {mode === 'csv' && <TableCell><Checkbox 
+                    checked={selectedRows[index] || false}
+                    onCheckedChange={(checked) => setSelectedRows(prev => ({...prev, [index]: !!checked}))}
+                    disabled={contact.status !== 'new'}
+                  /></TableCell>}
+                  <TableCell><Input value={contact.name} onChange={(e) => handleInputChange(index, 'name', e.target.value)} /></TableCell>
+                  <TableCell><Input value={contact.phone} onChange={(e) => handleInputChange(index, 'phone', e.target.value)} /></TableCell>
+                  <TableCell>
+                    <Select value={contact.gender} onValueChange={(value) => handleInputChange(index, 'gender', value)}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="male">Male</SelectItem>
+                        <SelectItem value="female">Female</SelectItem>
+                        <SelectItem value="unknown">Unknown</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </TableCell>
+                  {(mode !== 'edit') && <TableCell><div className="flex items-center gap-2" title={contact.message}>{getStatusIcon(contact.status)} <span className="text-xs text-muted-foreground truncate">{contact.message}</span></div></TableCell>}
+                  {(mode !== 'csv') && <TableCell className="text-right"><Button variant="ghost" size="icon" onClick={() => removeContact(index)}><Trash2 className="h-4 w-4 text-red-500" /></Button></TableCell>}
                 </TableRow>
-              </TableHeader>
-              <TableBody>
-                {editedData.map((contact, index) => {
-                  const duplicateInfo = getDuplicateInfo(index);
-                  const isInvalid = !!validationErrors[index];
-                  const highlightClass = duplicateInfo.isDuplicate
-                    ? "bg-red-100 dark:bg-red-900/50 hover:bg-red-200 dark:hover:bg-red-800/60"
-                    : "";
-                  const tableRow = (
-                      <TableRow className={cn("transition-colors", highlightClass)}>
-                        <TableCell>
-                          <Input
-                            value={contact.name}
-                            onChange={(e) => handleInputChange(index, 'name', e.target.value)}
-                            placeholder="Enter name..."
-                            className="bg-transparent"
-                          />
-                        </TableCell>
-                        <TableCell className="align-top">
-                          <Input
-                            value={contact.phone}
-                            onChange={(e) => handleInputChange(index, 'phone', e.target.value)}
-                            placeholder="e.g., +44 7700 900123"
-                            className={cn(
-                              "bg-transparent",
-                              isInvalid && "border-red-500 text-red-900 focus-visible:ring-red-500"
-                            )}
-                          />
-                          {isInvalid && (
-                            <p className="text-xs text-red-600 mt-1 flex items-center">
-                              <AlertCircle className="h-3 w-3 mr-1 flex-shrink-0" />
-                              {validationErrors[index]}
-                            </p>
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          <Select
-                            value={contact.gender}
-                            onValueChange={(value) => handleInputChange(index, 'gender', value)}
-                          >
-                            <SelectTrigger>
-                              <SelectValue placeholder="Select gender" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="male">Male</SelectItem>
-                              <SelectItem value="female">Female</SelectItem>
-                              <SelectItem value="unknown">Unknown</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <Button variant="ghost" size="icon" onClick={() => removeContact(index)}>
-                            <Trash2 className="h-4 w-4 text-red-500" />
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                  );
-
-                  return (
-                    <React.Fragment key={index}>
-                      {duplicateInfo.isDuplicate ? (
-                        <Tooltip delayDuration={300}>
-                          <TooltipTrigger asChild>{tableRow}</TooltipTrigger>
-                          <TooltipContent>
-                            <p>Duplicate of row #{duplicateInfo.originalIndex! + 1} ({editedData[duplicateInfo.originalIndex!].name})</p>
-                          </TooltipContent>
-                        </Tooltip>
-                      ) : (
-                        tableRow
-                      )}
-                    </React.Fragment>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          </div>
-          <div className="pt-4">
-            <Button variant="outline" className="w-full" onClick={addContact}>
-              <PlusCircle className="mr-2 h-4 w-4" /> Add Contact
-            </Button>
-          </div>
-          <DialogFooter className="sm:justify-between">
-            {hasDuplicates ? (
-              <Button variant="destructive" onClick={handleDeleteDuplicates}>
-                Delete all Duplicates
-              </Button>
-            ) : (
-              <div />
-            )}
-            <Button type="submit" onClick={handleSaveClick}>Save All Contacts</Button>
-          </DialogFooter>
-        </TooltipProvider>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+        
+        <div className="pt-4 flex flex-wrap gap-2">
+          {(mode === 'ocr' || mode === 'edit') && 
+            <Button variant="outline" onClick={addContact}><PlusCircle className="mr-2 h-4 w-4" /> Add Contact</Button>
+          }
+          {hasDuplicates && 
+            <Button variant="outline" onClick={handleRemoveDuplicates} className="text-yellow-600 border-yellow-300 hover:bg-yellow-50">Remove Duplicates</Button>
+          }
+          {hasInvalids && 
+            <Button variant="outline" onClick={handleRemoveInvalids} className="text-red-600 border-red-300 hover:bg-red-50">Remove Invalid Rows</Button>
+          }
+        </div>
+        
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setIsOpen(false)}>Cancel</Button>
+          <Button onClick={handleSaveClick}>
+            {mode === 'csv' ? 'Save Selected Contacts' : 'Save Contacts'}
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

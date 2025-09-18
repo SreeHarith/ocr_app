@@ -22,10 +22,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { CSVLink } from 'react-csv';
-import { Download, Upload, FileImage, Camera } from 'lucide-react';
+import dynamic from 'next/dynamic';
+import { Download, Upload, FileImage, Camera, FileText } from 'lucide-react';
 import Papa from 'papaparse';
 
+const DynamicCSVLink = dynamic(
+  () => import('react-csv').then((mod) => mod.CSVLink),
+  { ssr: false }
+);
+
+type DialogMode = 'csv' | 'ocr' | 'edit';
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
@@ -38,31 +44,49 @@ export default function Home() {
   const [isNotFoundDialogOpen, setIsNotFoundDialogOpen] = useState(false);
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  const [isTableLoading, setIsTableLoading] = useState(true);
+  const [dialogMode, setDialogMode] = useState<DialogMode>('edit');
 
-  // Standard refs for file inputs and canvas
   const imageInputRef = useRef<HTMLInputElement>(null);
   const csvInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  // ====================== SIMPLIFIED CALLBACK REF ======================
-  // This is a simpler, more direct way to create a callback ref.
   const [videoNode, setVideoNode] = useState<HTMLVideoElement | null>(null);
+
+  const videoRef = useCallback((node: HTMLVideoElement) => {
+    if (node !== null) setVideoNode(node);
+  }, []);
+
+  const fetchContacts = useCallback(async () => {
+    setIsTableLoading(true);
+    try {
+      const response = await fetch('/api/contacts');
+      if (!response.ok) throw new Error('Failed to fetch contacts');
+      const data = await response.json();
+      setTableData(data);
+    } catch (error) {
+      console.error("Fetch error:", error);
+      alert("Could not load contacts from the database.");
+    } finally {
+      setIsTableLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchContacts();
+  }, [fetchContacts]);
 
   useEffect(() => {
     const handleVideoPlay = () => {
       videoNode?.play().catch(error => console.error("Error trying to play video:", error));
     };
-
     if (isCameraOpen && cameraStream && videoNode) {
       videoNode.srcObject = cameraStream;
       videoNode.addEventListener('loadedmetadata', handleVideoPlay);
     }
-
     return () => {
       videoNode?.removeEventListener('loadedmetadata', handleVideoPlay);
     };
   }, [isCameraOpen, cameraStream, videoNode]);
-  // ====================================================================
   
   useEffect(() => {
     return () => {
@@ -71,9 +95,14 @@ export default function Home() {
   }, [imagePreviewUrl]);
 
   const csvHeaders = [
-    { label: "Name", key: "name" },
-    { label: "Phone Number", key: "phone" },
-    { label: "Gender", key: "gender" }
+    { label: "name", key: "name" },
+    { label: "phone", key: "phone" },
+    { label: "gender", key: "gender" }
+  ];
+  
+  const sampleCsvData = [
+    { name: "John Doe", phone: "\t+919876543210", gender: "male" },
+    { name: "Jane Smith", phone: "\t+917890123456", gender: "female" },
   ];
 
   const getCSVData = () => {
@@ -102,36 +131,30 @@ export default function Home() {
       return;
     }
     setIsLoading(true);
-
     try {
       const formData = new FormData();
       formData.append('file', file);
-      const uploadResponse = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
-      });
+      const uploadResponse = await fetch('/api/upload', { method: 'POST', body: formData });
       const uploadData = await uploadResponse.json();
-      if (!uploadResponse.ok) {
-        throw new Error(uploadData.error || 'Failed to upload image.');
-      }
+      if (!uploadResponse.ok) throw new Error(uploadData.error || 'Failed to upload image.');
+      
       const imageUrl = uploadData.url;
       const ocrResponse = await fetch('/api/ocr', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ imageUrl }),
       });
-      const ocrData = await ocrResponse.json();
-      if (!ocrResponse.ok) {
-        throw new Error(ocrData.error || 'Failed to process image with OCR.');
-      }
-      if (Array.isArray(ocrData) && ocrData.length > 0) {
-        setExtractedInfo(ocrData);
+      const validatedContacts = await ocrResponse.json();
+      if (!ocrResponse.ok) throw new Error(validatedContacts.message || 'Failed to process image');
+
+      if (Array.isArray(validatedContacts) && validatedContacts.length > 0) {
+        setExtractedInfo(validatedContacts);
+        setDialogMode('ocr');
         setIsDialogOpen(true);
       } else {
         setIsNotFoundDialogOpen(true);
       }
     } catch (error: any) {
-      console.error('An error occurred during extraction:', error);
       alert(`An error occurred: ${error.message}`);
     } finally {
       setIsLoading(false);
@@ -140,62 +163,55 @@ export default function Home() {
 
   const handleCsvImport = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (!file) {
-      return;
-    }
-
-    Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
-      complete: (results) => {
-        try {
-          const importedContacts: Contact[] = results.data
-            .map((row: any) => {
-              const name = row.name || row.Name;
-              const phone = row.phone || row['Phone Number'];
-              const gender = (row.gender || row.Gender || 'unknown').toLowerCase();
-
-              if (name && phone) {
-                return {
-                  name: String(name).trim(),
-                  phone: String(phone).trim(),
-                  gender: String(gender).trim(),
-                };
-              }
-              return null;
-            })
-            .filter((contact): contact is Contact => contact !== null);
-
-          if (importedContacts.length > 0) {
-            setTableData(prevData => [...prevData, ...importedContacts]);
-            alert(`${importedContacts.length} contacts imported successfully!`);
-          } else {
-            alert("Could not find valid contacts in the CSV file. Please ensure the file has 'name' and 'phone' columns.");
+    if (!file) return;
+    setIsLoading(true);
+    new Promise<Contact[]>((resolve, reject) => {
+      Papa.parse(file, {
+        header: true, skipEmptyLines: true,
+        complete: (results) => {
+          const headers = results.meta.fields || [];
+          if (!headers.some(h => h.toLowerCase().includes('name')) || !headers.some(h => h.toLowerCase().includes('phone'))) {
+            return reject(new Error("Import failed: CSV must contain 'name' and 'phone' columns."));
           }
-        } catch (error) {
-          console.error("Error parsing CSV:", error);
-          alert("An error occurred while parsing the CSV file.");
-        }
-      },
-      error: (error: any) => {
-        console.error("CSV parsing error:", error);
-        alert(`Error parsing CSV file: ${error.message}`);
+          const parsed = results.data.map((row: any) => ({ name: row.name || row.Name || '', phone: row.phone || row['Phone Number'] || '', gender: (row.gender || row.Gender || 'unknown').toLowerCase() }));
+          resolve(parsed);
+        },
+        error: (error: any) => reject(error),
+      });
+    })
+    .then(async (parsedContacts) => {
+      if (parsedContacts.length === 0) {
+        alert("No valid contacts found in the CSV file.");
+        return;
       }
+      const response = await fetch('/api/contacts/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsedContacts),
+      });
+      const validatedContacts = await response.json();
+      if (!response.ok) throw new Error(validatedContacts.message || 'Validation failed.');
+      
+      setExtractedInfo(validatedContacts);
+      setDialogMode('csv');
+      setIsDialogOpen(true);
+    })
+    .catch((err: Error) => {
+        alert(err.message);
+    })
+    .finally(() => {
+        setIsLoading(false);
+        if(event.target) event.target.value = '';
     });
-
-    if(event.target) event.target.value = '';
   };
 
   const handleOpenCamera = async () => {
     if ('mediaDevices' in navigator && 'getUserMedia' in navigator.mediaDevices) {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ 
-          video: { facingMode: 'environment' }
-        });
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
         setCameraStream(stream);
         setIsCameraOpen(true);
       } catch (err) {
-        console.error("Camera error:", err);
         alert("Could not access the camera. Please check your browser permissions.");
       }
     } else {
@@ -213,7 +229,6 @@ export default function Home() {
     if (videoNode && canvasRef.current) {
       const canvas = canvasRef.current;
       if (videoNode.videoWidth === 0) return;
-
       canvas.width = videoNode.videoWidth;
       canvas.height = videoNode.videoHeight;
       canvas.getContext('2d')?.drawImage(videoNode, 0, 0, videoNode.videoWidth, videoNode.videoHeight);
@@ -225,32 +240,61 @@ export default function Home() {
           setImagePreviewUrl(URL.createObjectURL(capturedFile));
         }
       }, 'image/png');
-      
       handleCloseCamera();
     }
   };
 
-  const handleSave = (data: Contact[]) => {
-    if (editingIndex !== null) {
-      const updatedTableData = [...tableData];
-      updatedTableData[editingIndex] = data[0];
-      setTableData(updatedTableData);
+  const handleSave = async (data: Contact[]) => {
+    if (data.length === 0) { setIsDialogOpen(false); return; }
+    const contactToSave = data[0];
+    try {
+      let response;
+      if (dialogMode === 'edit' && editingIndex !== null && contactToSave._id) {
+        response = await fetch(`/api/contacts/${contactToSave._id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(contactToSave),
+        });
+      } else {
+        response = await fetch('/api/contacts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        });
+      }
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message);
+      await fetchContacts();
+      alert(result.message);
+    } catch (error: any) {
+      alert(`Error: ${error.message}`);
+    } 
+    finally {
+      setIsDialogOpen(false);
       setEditingIndex(null);
-    } else {
-      setTableData((prevData) => [...prevData, ...data]);
-    }
-    setIsDialogOpen(false);
-  };
-
-  const handleDeleteRow = (index: number) => {
-    if (confirm('Are you sure you want to delete this contact?')) {
-      setTableData((prevData) => prevData.filter((_, i) => i !== index));
     }
   };
 
+  const handleDeleteRow = async (index: number) => {
+    const contactToDelete = tableData[index];
+    if (!contactToDelete._id) return;
+    if (confirm('Are you sure you want to delete this contact permanently?')) {
+      try {
+        const response = await fetch(`/api/contacts/${contactToDelete._id}`, { method: 'DELETE' });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.message);
+        await fetchContacts();
+        alert(result.message);
+      } catch (error: any) {
+        alert(`Error: ${error.message}`);
+      }
+    }
+  };
+  
   const handleEditRow = (index: number, contact: Contact) => {
-    setEditingIndex(index);
     setExtractedInfo([contact]);
+    setDialogMode('edit');
+    setEditingIndex(index);
     setIsDialogOpen(true);
   };
 
@@ -266,7 +310,6 @@ export default function Home() {
 
         <div className="relative p-6 border rounded-lg bg-card shadow-sm mb-8">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
-
             <div className="flex flex-col gap-3">
               <h3 className="font-semibold text-center md:text-left">Option 1: Extract from Image</h3>
               <div className="flex flex-col sm:flex-row items-center gap-2">
@@ -308,10 +351,9 @@ export default function Home() {
                   {isLoading ? 'Processing...' : 'Extract from Image'}
                 </Button>
             </div>
-
             <div className="flex flex-col gap-3">
               <h3 className="font-semibold text-center md:text-left">Option 2: Import from CSV</h3>
-              <div className="flex items-center justify-center md:justify-start">
+              <div className="flex flex-col sm:flex-row items-center justify-center md:justify-start gap-4">
                 <Input
                   type="file"
                   ref={csvInputRef}
@@ -321,15 +363,23 @@ export default function Home() {
                 />
                 <Button 
                   onClick={() => csvInputRef.current?.click()} 
-                  variant="outline" 
-                  className="w-full sm:w-auto"
+                  variant="outline"
                 >
                   <Upload className="mr-2 h-4 w-4" />
                   Import CSV File
                 </Button>
+                
+                <DynamicCSVLink
+                  data={sampleCsvData}
+                  headers={csvHeaders}
+                  filename={"contacts-template.csv"}
+                  className="text-sm text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1 whitespace-nowrap"
+                >
+                  <FileText className="h-4 w-4" />
+                  Download Template
+                </DynamicCSVLink>
               </div>
             </div>
-
           </div>
           <div className="absolute top-4 bottom-4 left-1/2 -translate-x-1/2 w-px bg-border hidden md:block" />
         </div>
@@ -352,7 +402,7 @@ export default function Home() {
         <div className="flex justify-between items-center mb-4">
           <h2 className="text-2xl font-semibold">Saved Contacts</h2>
           {tableData.length > 0 && (
-            <CSVLink
+            <DynamicCSVLink
               data={getCSVData()}
               headers={csvHeaders}
               filename={"contacts.csv"}
@@ -360,12 +410,13 @@ export default function Home() {
             >
               <Download className="mr-2 h-4 w-4" />
               Download CSV
-            </CSVLink>
+            </DynamicCSVLink>
           )}
         </div>
         
         <YourDataTable
           data={tableData}
+          isLoading={isTableLoading}
           handleDeleteRow={handleDeleteRow}
           handleEditRow={handleEditRow}
         />
@@ -375,6 +426,7 @@ export default function Home() {
           setIsOpen={setIsDialogOpen}
           data={extractedInfo}
           onSave={handleSave}
+          mode={dialogMode}
         />
         
         <AlertDialog open={isNotFoundDialogOpen} onOpenChange={setIsNotFoundDialogOpen}>
@@ -396,8 +448,7 @@ export default function Home() {
             <DialogHeader>
               <DialogTitle>Capture Image</DialogTitle>
             </DialogHeader>
-            {/* The ref prop now gets the state setter function directly */}
-            <video ref={setVideoNode} autoPlay playsInline muted className="w-full aspect-video rounded-md border bg-black" />
+            <video ref={videoRef} autoPlay playsInline muted className="w-full aspect-video rounded-md border bg-black" />
             <canvas ref={canvasRef} className="hidden" />
             <DialogFooter className="gap-2 sm:justify-center">
               <Button variant="outline" onClick={handleCloseCamera}>Cancel</Button>

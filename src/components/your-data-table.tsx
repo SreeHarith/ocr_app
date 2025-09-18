@@ -16,15 +16,16 @@ import {
 } from "@/components/ui/table"
 import { columns, Contact } from "./columns"
 
-// UPDATED: Add handler functions to the props
 interface DataTableProps<TData, TValue> {
   data: TData[]
+  isLoading: boolean
   handleDeleteRow: (index: number) => void
   handleEditRow: (index: number, contact: Contact) => void
 }
 
 export function YourDataTable<TData, TValue>({
   data,
+  isLoading,
   handleDeleteRow,
   handleEditRow,
 }: DataTableProps<TData, TValue>) {
@@ -32,7 +33,6 @@ export function YourDataTable<TData, TValue>({
     data,
     columns: columns as ColumnDef<TData, TValue>[],
     getCoreRowModel: getCoreRowModel(),
-    // UPDATED: Pass the handler functions into the table's "meta" property
     meta: {
       handleDeleteRow,
       handleEditRow,
@@ -61,7 +61,13 @@ export function YourDataTable<TData, TValue>({
           ))}
         </TableHeader>
         <TableBody>
-          {table.getRowModel().rows?.length ? (
+          {isLoading ? (
+            <TableRow>
+              <TableCell colSpan={columns.length} className="h-24 text-center">
+                Loading contacts...
+              </TableCell>
+            </TableRow>
+          ) : table.getRowModel().rows?.length ? (
             table.getRowModel().rows.map((row) => (
               <TableRow
                 key={row.id}
@@ -77,7 +83,7 @@ export function YourDataTable<TData, TValue>({
           ) : (
             <TableRow>
               <TableCell colSpan={columns.length} className="h-24 text-center">
-                No contacts added yet.
+                No contacts saved in the database.
               </TableCell>
             </TableRow>
           )}

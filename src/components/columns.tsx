@@ -5,9 +5,12 @@ import { Button } from "@/components/ui/button"
 import { Edit, Trash2 } from "lucide-react"
 
 export type Contact = {
+  _id?: string;
   name: string
   phone: string
-  gender: string // Add gender field
+  gender: string 
+  status?: 'new' | 'duplicate' | 'invalid'
+  message?: string
 }
 
 export const columns: ColumnDef<Contact>[] = [
