@@ -3,20 +3,13 @@ import clientPromise from '@/lib/mongodb';
 import { ObjectId } from 'mongodb';
 import { normalizeDateString } from '@/lib/dateUtils';
 
-// This interface is correct.
-interface Context {
-  params: {
-    id: string;
-  };
-}
-
 function isValidObjectId(id: string) {
     return ObjectId.isValid(id) && String(new ObjectId(id)) === id;
 }
 
-// FIX: The function's second argument is typed as 'context: Context'.
-export async function PUT(request: NextRequest, context: Context) {
-  const { id } = context.params; // Get id from context.params
+// FIX: The type for the second argument is now defined directly (inline).
+export async function PUT(request: NextRequest, context: { params: { id: string } }) {
+  const id = context.params.id; // Get id from context.params
 
   if (!isValidObjectId(id)) {
     return NextResponse.json({ message: 'Invalid Contact ID format' }, { status: 400 });
@@ -53,9 +46,9 @@ export async function PUT(request: NextRequest, context: Context) {
   }
 }
 
-// FIX: The function's second argument is also typed as 'context: Context'.
-export async function DELETE(request: NextRequest, context: Context) {
-    const { id } = context.params; // Get id from context.params
+// FIX: The type for the second argument is also defined directly (inline).
+export async function DELETE(request: NextRequest, context: { params: { id: string } }) {
+    const id = context.params.id; // Get id from context.params
 
     if (!isValidObjectId(id)) {
         return NextResponse.json({ message: 'Invalid Contact ID format' }, { status: 400 });
