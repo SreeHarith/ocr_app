@@ -3,12 +3,21 @@ import clientPromise from '@/lib/mongodb';
 import { ObjectId } from 'mongodb';
 import { normalizeDateString } from '@/lib/dateUtils';
 
+// Define a context type for the route's params
+interface Context {
+  params: {
+    id: string;
+  };
+}
+
 function isValidObjectId(id: string) {
     return ObjectId.isValid(id) && String(new ObjectId(id)) === id;
 }
 
-// FIX: Destructure 'id' directly from params
-export async function PUT(request: NextRequest, { params: { id } }: { params: { id: string } }) {
+// Apply the correct Context type to the function
+export async function PUT(request: NextRequest, { params }: Context) {
+  const { id } = params; // Get the id from params
+
   if (!isValidObjectId(id)) {
     return NextResponse.json({ message: 'Invalid Contact ID format' }, { status: 400 });
   }
@@ -44,8 +53,10 @@ export async function PUT(request: NextRequest, { params: { id } }: { params: { 
   }
 }
 
-// FIX: Destructure 'id' directly from params
-export async function DELETE(request: NextRequest, { params: { id } }: { params: { id: string } }) {
+// Apply the correct Context type to the function
+export async function DELETE(request: NextRequest, { params }: Context) {
+    const { id } = params; // Get the id from params
+
     if (!isValidObjectId(id)) {
         return NextResponse.json({ message: 'Invalid Contact ID format' }, { status: 400 });
     }
