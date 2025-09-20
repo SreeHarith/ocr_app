@@ -29,29 +29,20 @@ const toE164 = (raw: string, country?: CountryCode): string => {
   return parsed?.number ?? (raw?.trim() ?? "");
 };
 
-// ====================== THE FIX IS HERE ======================
-// The stricter validation for Indian mobile numbers is added back.
 const getValidationError = (name: string, phone: string): string | null => {
   if (!name || !name.trim()) return "Name is required.";
   if (!phone || !phone.trim()) return "Phone is required.";
-  
   const parsed = parsePhoneNumberFromString(phone, DEFAULT_COUNTRY);
-  
   if (!parsed || !parsed.isValid()) {
     return "Invalid phone number format.";
   }
-
-  // Stricter rule for Indian mobile numbers
   if (parsed.country === 'IN') {
-    // Valid Indian mobile numbers are 10 digits long and must start with 6, 7, 8, or 9.
     if (!/^[6789]\d{9}$/.test(parsed.nationalNumber)) {
       return "Invalid Indian mobile number.";
     }
   }
-
   return null;
 };
-// =============================================================
 
 export default function EditDialog({ isOpen, setIsOpen, data, onSave, mode }: EditDialogProps) {
   const [editedData, setEditedData] = useState<Contact[]>([]);
@@ -64,20 +55,15 @@ export default function EditDialog({ isOpen, setIsOpen, data, onSave, mode }: Ed
         seenPhones.add(toE164(contact.phone));
         return contact;
       }
-      
       const phoneE164 = toE164(contact.phone);
       const validationError = getValidationError(contact.name, contact.phone);
-
       if (validationError) {
         return { ...contact, status: 'invalid', message: validationError };
       }
-      
       if (phoneE164 && seenPhones.has(phoneE164)) {
           return { ...contact, status: 'duplicate', message: 'Duplicate within this list.' };
       }
-      
       if(phoneE164) seenPhones.add(phoneE164);
-      
       return { ...contact, status: 'new', message: 'Ready to save.' };
     });
   };
@@ -86,7 +72,6 @@ export default function EditDialog({ isOpen, setIsOpen, data, onSave, mode }: Ed
     if (data) {
         const processedData = runInternalValidation(data);
         setEditedData(processedData);
-
         const initialSelection: Record<number, boolean> = {};
         if (mode === 'csv') {
             processedData.forEach((contact, index) => {
@@ -97,7 +82,7 @@ export default function EditDialog({ isOpen, setIsOpen, data, onSave, mode }: Ed
     }
   }, [data, mode]);
 
-  const handleInputChange = (index: number, field: 'name' | 'phone' | 'gender', value: string) => {
+  const handleInputChange = (index: number, field: 'name' | 'phone' | 'gender' | 'birthday' | 'anniversary', value: string) => {
     setEditedData(prevData => {
       const updated = [...prevData];
       updated[index] = { ...updated[index], [field]: value };
@@ -154,9 +139,31 @@ export default function EditDialog({ isOpen, setIsOpen, data, onSave, mode }: Ed
   const hasDuplicates = editedData.some(c => c.status === 'duplicate');
   const hasInvalids = editedData.some(c => c.status === 'invalid');
 
+  const tableHeaders: ReactNode[] = [];
+  if (mode === 'csv') {
+    tableHeaders.push(<TableHead key="select" className="w-[50px]"><Checkbox 
+        onCheckedChange={(checked) => {
+            const newSelection: Record<number, boolean> = {};
+            if(checked) editedData.forEach((c, i) => { if(c.status === 'new') newSelection[i] = true; });
+            setSelectedRows(newSelection);
+        }}
+    /></TableHead>);
+  }
+  tableHeaders.push(<TableHead key="name">Name</TableHead>);
+  tableHeaders.push(<TableHead key="phone">Phone Number</TableHead>);
+  tableHeaders.push(<TableHead key="gender">Gender</TableHead>);
+  tableHeaders.push(<TableHead key="birthday">Birthday</TableHead>);
+  tableHeaders.push(<TableHead key="anniversary">Anniversary</TableHead>);
+  if (mode !== 'edit') {
+    tableHeaders.push(<TableHead key="status">Status</TableHead>);
+  }
+  if (mode !== 'csv') {
+    tableHeaders.push(<TableHead key="actions" className="text-right">Actions</TableHead>);
+  }
+
   return (
     <Dialog open={isOpen} onOpenChange={setIsOpen}>
-      <DialogContent className="sm:max-w-4xl">
+      <DialogContent className="sm:max-w-7xl">
         <DialogHeader>
           <DialogTitle>Verify Information</DialogTitle>
           <DialogDescription>
@@ -168,24 +175,11 @@ export default function EditDialog({ isOpen, setIsOpen, data, onSave, mode }: Ed
         <div className="max-h-[60vh] overflow-y-auto pr-2">
           <Table>
             <TableHeader>
-              <TableRow>
-                {mode === 'csv' && <TableHead className="w-[50px]"><Checkbox 
-                  onCheckedChange={(checked) => {
-                      const newSelection: Record<number, boolean> = {};
-                      if(checked) editedData.forEach((c, i) => { if(c.status === 'new') newSelection[i] = true; });
-                      setSelectedRows(newSelection);
-                  }}
-                /></TableHead>}
-                <TableHead>Name</TableHead>
-                <TableHead>Phone Number</TableHead>
-                <TableHead>Gender</TableHead>
-                {(mode !== 'edit') && <TableHead>Status</TableHead>}
-                {(mode !== 'csv') && <TableHead className="text-right">Actions</TableHead>}
-              </TableRow>
+              <TableRow>{tableHeaders}</TableRow>
             </TableHeader>
             <TableBody>
               {editedData.map((contact, index) => (
-                <TableRow key={index} className={cn(getRowClass(contact.status))}>
+                <TableRow key={index} className={getRowClass(contact.status)}>
                   {mode === 'csv' && <TableCell><Checkbox 
                     checked={selectedRows[index] || false}
                     onCheckedChange={(checked) => setSelectedRows(prev => ({...prev, [index]: !!checked}))}
@@ -203,6 +197,8 @@ export default function EditDialog({ isOpen, setIsOpen, data, onSave, mode }: Ed
                       </SelectContent>
                     </Select>
                   </TableCell>
+                  <TableCell><Input type="date" value={contact.birthday || ''} onChange={(e) => handleInputChange(index, 'birthday', e.target.value)} /></TableCell>
+                  <TableCell><Input type="date" value={contact.anniversary || ''} onChange={(e) => handleInputChange(index, 'anniversary', e.target.value)} /></TableCell>
                   {(mode !== 'edit') && <TableCell><div className="flex items-center gap-2" title={contact.message}>{getStatusIcon(contact.status)} <span className="text-xs text-muted-foreground truncate">{contact.message}</span></div></TableCell>}
                   {(mode !== 'csv') && <TableCell className="text-right"><Button variant="ghost" size="icon" onClick={() => removeContact(index)}><Trash2 className="h-4 w-4 text-red-500" /></Button></TableCell>}
                 </TableRow>

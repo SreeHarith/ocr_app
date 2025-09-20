@@ -1,19 +1,237 @@
 
 
-=== FILE: \src\app\api\ocr\route.ts ===
+=== FILE: \src\app\api\contacts\route.ts ===
 
 import { NextRequest, NextResponse } from 'next/server';
+import clientPromise from '@/lib/mongodb';
+import { Collection } from 'mongodb';
+import { Contact } from '@/components/columns';
 
-// Function to call the Gender-API.com API
+// ================== ADD THIS LINE ==================
+// This forces the route to be dynamic, preventing caching.
+export const dynamic = 'force-dynamic';
+// ===================================================
+
+export async function POST(request: NextRequest) {
+  try {
+    const contacts: Contact[] = await request.json();
+    if (!Array.isArray(contacts) || contacts.length === 0) {
+      return NextResponse.json({ message: 'No contacts provided.' }, { status: 400 });
+    }
+    const client = await clientPromise;
+    const db = client.db();
+    const contactsCollection: Collection<Contact> = db.collection('contacts');
+    const result = await contactsCollection.insertMany(contacts);
+    return NextResponse.json({ 
+      message: `${result.insertedCount} contacts saved successfully.`,
+      insertedIds: result.insertedIds 
+    }, { status: 201 });
+  } catch (error) {
+    console.error('Failed to save contacts:', error);
+    return NextResponse.json({ message: 'Failed to save contacts.' }, { status: 500 });
+  }
+}
+
+export async function GET() {
+  try {
+    const client = await clientPromise;
+    const db = client.db();
+
+    const contacts = await db
+      .collection('contacts')
+      .find({})
+      .sort({ _id: -1 })
+      .toArray();
+    
+    const sanitizedContacts = contacts.map((contact) => ({
+      ...contact,
+      _id: contact._id.toString(),
+    }));
+
+    return NextResponse.json(sanitizedContacts, { status: 200 });
+  } catch (error) {
+    console.error('Failed to fetch contacts:', error);
+    return NextResponse.json({ message: 'Failed to fetch contacts.' }, { status: 500 });
+  }
+}
+
+=== FILE: \src\app\api\contacts\validate\route.ts ===
+
+import { NextRequest, NextResponse } from 'next/server';
+import clientPromise from '@/lib/mongodb';
+import { parsePhoneNumberFromString } from 'libphonenumber-js';
+import { Contact } from '@/components/columns';
+import { normalizeDateString } from '@/lib/dateUtils';
+
 async function getGender(name: string, apiKey: string) {
   const firstName = name.split(' ')[0];
   try {
     const response = await fetch(`https://gender-api.com/get?name=${firstName}&key=${apiKey}`);
     const data = await response.json();
-    if (data.errno) {
-      console.error("Gender-API.com Error:", data.errmsg);
-      return 'unknown';
+    return data.gender || 'unknown';
+  } catch (error) {
+    return 'unknown';
+  }
+}
+
+export async function POST(request: NextRequest) {
+  const genderApiKey = process.env.GENDER_API_KEY!;
+  try {
+    const contacts: Contact[] = await request.json();
+    if (!Array.isArray(contacts) || contacts.length === 0) {
+      return NextResponse.json({ message: 'No contacts provided.' }, { status: 400 });
     }
+
+    const normalizedContacts = contacts.map(c => ({
+      ...c,
+      phone: parsePhoneNumberFromString(c.phone, 'IN')?.format('E.164') || c.phone,
+    }));
+
+    const phoneNumbers = normalizedContacts.map(c => c.phone).filter(Boolean);
+    const client = await clientPromise;
+    const db = client.db();
+    const existingContacts = await db.collection('contacts').find({ phone: { $in: phoneNumbers } }).toArray();
+    const existingPhones = new Map(existingContacts.map(c => [c.phone, c]));
+
+    const validatedContacts: Contact[] = [];
+    const seenPhonesInCSV = new Set<string>();
+
+    for (const contact of normalizedContacts) {
+      if (!contact.name) {
+        validatedContacts.push({ ...contact, status: 'invalid', message: 'Name is missing.' });
+        continue;
+      }
+      if (!contact.phone) {
+        validatedContacts.push({ ...contact, status: 'invalid', message: 'Phone is missing.' });
+        continue;
+      }
+
+      const phoneNumber = parsePhoneNumberFromString(contact.phone, 'IN');
+      if (!phoneNumber || !phoneNumber.isValid()) {
+        validatedContacts.push({ ...contact, status: 'invalid', message: 'Invalid phone number format.' });
+        continue;
+      }
+      
+      if (existingPhones.has(contact.phone)) {
+        const existingContact = existingPhones.get(contact.phone);
+        validatedContacts.push({ ...contact, status: 'duplicate', message: `Exists in DB as '${existingContact?.name}'.` });
+        continue;
+      }
+      
+      if (seenPhonesInCSV.has(contact.phone)) {
+        validatedContacts.push({ ...contact, status: 'duplicate', message: 'Duplicate within this file.' });
+        continue;
+      }
+      
+      seenPhonesInCSV.add(contact.phone);
+      
+      if (!contact.gender || contact.gender === 'unknown') {
+        contact.gender = await getGender(contact.name, genderApiKey);
+      }
+      
+      validatedContacts.push({ 
+        ...contact, 
+        status: 'new', 
+        message: 'Ready to import.',
+        birthday: normalizeDateString(contact.birthday),
+        anniversary: normalizeDateString(contact.anniversary)
+      });
+    }
+
+    return NextResponse.json(validatedContacts, { status: 200 });
+  } catch (error) {
+    console.error('Validation error:', error);
+    return NextResponse.json({ message: 'Failed to validate contacts.' }, { status: 500 });
+  }
+}
+
+
+
+=== FILE: \src\app\api\contacts\[id]\route.ts ===
+
+import { NextRequest, NextResponse } from 'next/server';
+import clientPromise from '@/lib/mongodb';
+import { ObjectId } from 'mongodb';
+import { normalizeDateString } from '@/lib/dateUtils';
+
+function isValidObjectId(id: string) {
+    return ObjectId.isValid(id) && String(new ObjectId(id)) === id;
+}
+
+export async function PUT(request: NextRequest, { params }: { params: { id: string } }) {
+  const id = params.id;
+  if (!isValidObjectId(id)) {
+    return NextResponse.json({ message: 'Invalid Contact ID format' }, { status: 400 });
+  }
+
+  try {
+    const { name, phone, gender, birthday, anniversary } = await request.json();
+    if (!name || !phone || !gender) {
+        return NextResponse.json({ message: 'Missing required fields' }, { status: 400 });
+    }
+
+    const client = await clientPromise;
+    const db = client.db();
+    const result = await db.collection('contacts').updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { 
+          name, 
+          phone, 
+          gender, 
+          birthday: normalizeDateString(birthday),
+          anniversary: normalizeDateString(anniversary) 
+        } 
+      }
+    );
+
+    if (result.matchedCount === 0) {
+        return NextResponse.json({ message: 'Contact not found' }, { status: 404 });
+    }
+
+    return NextResponse.json({ message: 'Contact updated successfully' }, { status: 200 });
+  } catch (error) {
+    console.error('Failed to update contact:', error);
+    return NextResponse.json({ message: 'Failed to update contact.' }, { status: 500 });
+  }
+}
+
+export async function DELETE(request: NextRequest, { params }: { params: { id: string } }) {
+    const id = params.id;
+    if (!isValidObjectId(id)) {
+        return NextResponse.json({ message: 'Invalid Contact ID format' }, { status: 400 });
+    }
+    
+    try {
+      const client = await clientPromise;
+      const db = client.db();
+      const result = await db.collection('contacts').deleteOne({ _id: new ObjectId(id) });
+  
+      if (result.deletedCount === 0) {
+        return NextResponse.json({ message: 'Contact not found' }, { status: 404 });
+      }
+  
+      return NextResponse.json({ message: 'Contact deleted successfully' }, { status: 200 });
+    } catch (error) {
+      console.error('Failed to delete contact:', error);
+      return NextResponse.json({ message: 'Failed to delete contact.' }, { status: 500 });
+    }
+}
+
+
+
+=== FILE: \src\app\api\ocr\route.ts ===
+
+import { NextRequest, NextResponse } from 'next/server';
+import clientPromise from '@/lib/mongodb';
+import { parsePhoneNumberFromString } from 'libphonenumber-js';
+import { Contact } from '@/components/columns';
+import { normalizeDateString } from '@/lib/dateUtils';
+
+async function getGender(name: string, apiKey: string) {
+  const firstName = name.split(' ')[0];
+  try {
+    const response = await fetch(`https://gender-api.com/get?name=${firstName}&key=${apiKey}`);
+    const data = await response.json();
     return data.gender || 'unknown';
   } catch (error) {
     console.error("Gender-API.com call failed:", error);
@@ -22,10 +240,9 @@ async function getGender(name: string, apiKey: string) {
 }
 
 export async function POST(request: NextRequest) {
-  // This route now expects a JSON body with an `imageUrl`.
   const { imageUrl } = await request.json();
   const genderApiKey = process.env.GENDER_API_KEY!;
-  console.log("URL being sent to OCR AI:", imageUrl);
+  
   if (!imageUrl) {
     return NextResponse.json({ error: 'No image URL provided' }, { status: 400 });
   }
@@ -38,16 +255,15 @@ export async function POST(request: NextRequest) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'qwen/qwen2.5-vl-72b-instruct:free',
+        model: 'qwen/qwen2.5-vl-72b-instruct',
         messages: [
           {
             role: 'user',
             content: [
               {
                 type: 'text',
-                text: 'You are an expert OCR system. Analyze the entire image and find ALL names and phone numbers. You MUST return ONLY a single, clean JSON array. Each object must have two keys: "name" and "phone". Example: [{"name": "John Doe", "phone": "111-222-3300"}]',
+                text: 'You are an expert OCR system. Analyze the image to find ALL names, phone numbers, birthdays, and anniversaries. Return ONLY a single, clean JSON array. Each object must have "name", "phone", "birthday", and "anniversary" keys. If a field is not found, its value should be null. Example: [{"name": "John Doe", "phone": "1112223300", "birthday": "1990-05-15", "anniversary": null}]',
               },
-              // The AI is now given the public URL of the image on Cloudinary.
               { type: 'image_url', image_url: { url: imageUrl } },
             ],
           },
@@ -58,28 +274,63 @@ export async function POST(request: NextRequest) {
     const ocrData = await ocrResponse.json();
 
     if (!ocrResponse.ok || !ocrData.choices || ocrData.choices.length === 0) {
-      console.error("OCR API Error Response:", ocrData);
-      throw new Error(`OCR API call failed. Response: ${JSON.stringify(ocrData)}`);
+      console.error("OCR API Error Response:", ocrData); 
+      throw new Error(ocrData?.error?.message || 'The OCR API call failed with an empty or invalid response.');
     }
 
     const content = ocrData.choices[0].message.content;
     const jsonString = content.match(/```json\n([\s\S]*?)\n```/)?.[1] || content;
-    const contacts: { name: string; phone: string }[] = JSON.parse(jsonString);
+    const initialContacts: Contact[] = JSON.parse(jsonString);
 
     const contactsWithGender = await Promise.all(
-      contacts.map(async (contact) => {
-        const gender = await getGender(contact.name, genderApiKey);
+      initialContacts.map(async (contact) => {
+        const gender = contact.gender || await getGender(contact.name, genderApiKey);
         return { ...contact, gender };
       })
     );
+    
+    const normalizedContacts = contactsWithGender.map(c => ({
+        ...c,
+        phone: parsePhoneNumberFromString(c.phone, 'IN')?.format('E.164') || c.phone,
+    }));
 
-    return NextResponse.json(contactsWithGender);
+    const phoneNumbers = normalizedContacts.map(c => c.phone);
+    const client = await clientPromise;
+    const db = client.db();
+    const existingContacts = await db.collection('contacts').find({ phone: { $in: phoneNumbers } }).toArray();
+    const existingPhones = new Map(existingContacts.map(c => [c.phone, c]));
+
+    const validatedContacts = normalizedContacts.map((contact): Contact => {
+        if (!contact.name || !contact.phone) {
+            return { ...contact, status: 'invalid', message: 'Missing name or phone.' };
+        }
+        
+        const phoneNumber = parsePhoneNumberFromString(contact.phone, 'IN');
+        if (!phoneNumber || !phoneNumber.isValid()) {
+            return { ...contact, status: 'invalid', message: 'Invalid phone number format.' };
+        }
+        
+        if (existingPhones.has(contact.phone)) {
+            const existing = existingPhones.get(contact.phone);
+            return { ...contact, status: 'duplicate', message: `Exists in DB as '${existing?.name}'.` };
+        }
+        return { 
+            ...contact, 
+            status: 'new', 
+            message: 'Ready to import.',
+            birthday: normalizeDateString(contact.birthday),
+            anniversary: normalizeDateString(contact.anniversary)
+        };
+    });
+
+    return NextResponse.json(validatedContacts);
 
   } catch (error) {
     console.error(error);
     return NextResponse.json({ error: 'Failed to process the image.' }, { status: 500 });
   }
 }
+
 
 
 === FILE: \src\app\api\upload\route.ts ===
@@ -107,7 +358,6 @@ export async function POST(request: NextRequest) {
   const bytes = Buffer.from(buffer);
 
   try {
-    // Upload the image to Cloudinary. We're using a Promise to handle the stream.
     const result: any = await new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
         {
@@ -116,7 +366,10 @@ export async function POST(request: NextRequest) {
           transformation: [
             { width: 1200, height: 1200, crop: 'limit' },
             { format: 'jpg', quality: 'auto:good' }
-          ]
+          ],
+          // ================== ADD THIS LINE ==================
+          eager: true, // This tells Cloudinary to process the image immediately.
+          // ===================================================
         },
         (error, result) => {
           if (error) {
@@ -145,11 +398,175 @@ export async function POST(request: NextRequest) {
 }
 
 
+=== FILE: \src\app\globals.css ===
+
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.646 0.222 41.116);
+  --chart-2: oklch(0.6 0.118 184.704);
+  --chart-3: oklch(0.398 0.07 227.392);
+  --chart-4: oklch(0.828 0.189 84.429);
+  --chart-5: oklch(0.769 0.188 70.08);
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.488 0.243 264.376);
+  --chart-2: oklch(0.696 0.17 162.48);
+  --chart-3: oklch(0.769 0.188 70.08);
+  --chart-4: oklch(0.627 0.265 303.9);
+  --chart-5: oklch(0.645 0.246 16.439);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+
+=== FILE: \src\app\layout.tsx ===
+
+import type { Metadata } from "next";
+import { Geist, Geist_Mono } from "next/font/google";
+import "./globals.css";
+
+const geistSans = Geist({
+  variable: "--font-geist-sans",
+  subsets: ["latin"],
+});
+
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
+
+export const metadata: Metadata = {
+  title: "Create Next App",
+  description: "Generated by create next app",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="en">
+      <body
+        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+      >
+        {children}
+      </body>
+    </html>
+  );
+}
+
+
 === FILE: \src\app\page.tsx ===
 
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { YourDataTable } from '@/components/your-data-table';
@@ -164,9 +581,23 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
-import { CSVLink } from 'react-csv';
-import { Download } from 'lucide-react';
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import dynamic from 'next/dynamic';
+import { Download, Upload, FileImage, Camera, FileText } from 'lucide-react';
+import Papa from 'papaparse';
 
+const DynamicCSVLink = dynamic(
+  () => import('react-csv').then((mod) => mod.CSVLink),
+  { ssr: false }
+);
+
+type DialogMode = 'csv' | 'ocr' | 'edit';
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
@@ -177,11 +608,69 @@ export default function Home() {
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [isNotFoundDialogOpen, setIsNotFoundDialogOpen] = useState(false);
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  const [isTableLoading, setIsTableLoading] = useState(true);
+  const [dialogMode, setDialogMode] = useState<DialogMode>('edit');
+
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const csvInputRef = useRef<HTMLInputElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [videoNode, setVideoNode] = useState<HTMLVideoElement | null>(null);
+
+  const videoRef = useCallback((node: HTMLVideoElement) => {
+    if (node !== null) setVideoNode(node);
+  }, []);
+
+  const fetchContacts = useCallback(async () => {
+    setIsTableLoading(true);
+    try {
+      const response = await fetch('/api/contacts');
+      if (!response.ok) throw new Error('Failed to fetch contacts');
+      const data = await response.json();
+      setTableData(data);
+    } catch (error) {
+      console.error("Fetch error:", error);
+      alert("Could not load contacts from the database.");
+    } finally {
+      setIsTableLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchContacts();
+  }, [fetchContacts]);
+
+  useEffect(() => {
+    const handleVideoPlay = () => {
+      videoNode?.play().catch(error => console.error("Error trying to play video:", error));
+    };
+    if (isCameraOpen && cameraStream && videoNode) {
+      videoNode.srcObject = cameraStream;
+      videoNode.addEventListener('loadedmetadata', handleVideoPlay);
+    }
+    return () => {
+      videoNode?.removeEventListener('loadedmetadata', handleVideoPlay);
+    };
+  }, [isCameraOpen, cameraStream, videoNode]);
+  
+  useEffect(() => {
+    return () => {
+      if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
+    };
+  }, [imagePreviewUrl]);
 
   const csvHeaders = [
-    { label: "Name", key: "name" },
-    { label: "Phone Number", key: "phone" },
-    { label: "Gender", key: "gender" }
+    { label: "name", key: "name" },
+    { label: "phone", key: "phone" },
+    { label: "gender", key: "gender" },
+    { label: "birthday", key: "birthday" },
+    { label: "anniversary", key: "anniversary" }
+  ];
+  
+  const sampleCsvData = [
+    { name: "Rohan Sharma", phone: "\t+919876543210", gender: "male", birthday: "1992-03-10", anniversary: "" },
+    { name: "Priya Patel", phone: "\t+917890123456", gender: "female", birthday: "1995-11-22", anniversary: "2020-06-01" },
   ];
 
   const getCSVData = () => {
@@ -190,12 +679,6 @@ export default function Home() {
       phone: `\t${contact.phone}`
     }));
   };
-
-  useEffect(() => {
-    return () => {
-      if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
-    };
-  }, [imagePreviewUrl]);
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
@@ -207,6 +690,7 @@ export default function Home() {
       setFile(null);
       setImagePreviewUrl(null);
     }
+    if(event.target) event.target.value = '';
   };
 
   const handleExtractClick = async () => {
@@ -215,72 +699,170 @@ export default function Home() {
       return;
     }
     setIsLoading(true);
-
     try {
-      // Step 1: Upload the image file to our backend, which forwards it to Cloudinary.
       const formData = new FormData();
       formData.append('file', file);
-
-      const uploadResponse = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
-      });
-
+      const uploadResponse = await fetch('/api/upload', { method: 'POST', body: formData });
       const uploadData = await uploadResponse.json();
-      if (!uploadResponse.ok) {
-        throw new Error(uploadData.error || 'Failed to upload image.');
-      }
+      if (!uploadResponse.ok) throw new Error(uploadData.error || 'Failed to upload image.');
       
       const imageUrl = uploadData.url;
-
-      // Step 2: Send the public image URL to the OCR API.
       const ocrResponse = await fetch('/api/ocr', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageUrl }), // Send the URL in the body
+        body: JSON.stringify({ imageUrl }),
       });
+      const validatedContacts = await ocrResponse.json();
+      if (!ocrResponse.ok) throw new Error(validatedContacts.message || 'Failed to process image');
 
-      const ocrData = await ocrResponse.json();
-      if (!ocrResponse.ok) {
-        throw new Error(ocrData.error || 'Failed to process image with OCR.');
-      }
-
-      if (Array.isArray(ocrData) && ocrData.length > 0) {
-        setExtractedInfo(ocrData);
+      if (Array.isArray(validatedContacts) && validatedContacts.length > 0) {
+        setExtractedInfo(validatedContacts);
+        setDialogMode('ocr');
         setIsDialogOpen(true);
       } else {
         setIsNotFoundDialogOpen(true);
       }
-
     } catch (error: any) {
-      console.error('An error occurred during extraction:', error);
       alert(`An error occurred: ${error.message}`);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleSave = (data: Contact[]) => {
-    if (editingIndex !== null) {
-      const updatedTableData = [...tableData];
-      updatedTableData[editingIndex] = data[0];
-      setTableData(updatedTableData);
-      setEditingIndex(null);
+  const handleCsvImport = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setIsLoading(true);
+    new Promise<Contact[]>((resolve, reject) => {
+      Papa.parse(file, {
+        header: true, skipEmptyLines: true,
+        complete: (results) => {
+          const headers = results.meta.fields || [];
+          if (!headers.some(h => h.toLowerCase().includes('name')) || !headers.some(h => h.toLowerCase().includes('phone'))) {
+            return reject(new Error("Import failed: CSV must contain 'name' and 'phone' columns."));
+          }
+          const parsed = results.data.map((row: any) => ({ name: row.name || row.Name || '', phone: row.phone || row['Phone Number'] || '', gender: (row.gender || row.Gender || 'unknown').toLowerCase() }));
+          resolve(parsed);
+        },
+        error: (error: any) => reject(error),
+      });
+    })
+    .then(async (parsedContacts) => {
+      if (parsedContacts.length === 0) {
+        alert("No valid contacts found in the CSV file.");
+        return;
+      }
+      const response = await fetch('/api/contacts/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsedContacts),
+      });
+      const validatedContacts = await response.json();
+      if (!response.ok) throw new Error(validatedContacts.message || 'Validation failed.');
+      
+      setExtractedInfo(validatedContacts);
+      setDialogMode('csv');
+      setIsDialogOpen(true);
+    })
+    .catch((err: Error) => {
+        alert(err.message);
+    })
+    .finally(() => {
+        setIsLoading(false);
+        if(event.target) event.target.value = '';
+    });
+  };
+
+  const handleOpenCamera = async () => {
+    if ('mediaDevices' in navigator && 'getUserMedia' in navigator.mediaDevices) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        setCameraStream(stream);
+        setIsCameraOpen(true);
+      } catch (err) {
+        alert("Could not access the camera. Please check your browser permissions.");
+      }
     } else {
-      setTableData((prevData) => [...prevData, ...data]);
-    }
-    setIsDialogOpen(false);
-  };
-
-  const handleDeleteRow = (index: number) => {
-    if (confirm('Are you sure you want to delete this contact?')) {
-      setTableData((prevData) => prevData.filter((_, i) => i !== index));
+      alert("Your browser does not support camera access.");
     }
   };
 
+  const handleCloseCamera = () => {
+    cameraStream?.getTracks().forEach(track => track.stop());
+    setCameraStream(null);
+    setIsCameraOpen(false);
+  };
+  
+  const handleCapture = () => {
+    if (videoNode && canvasRef.current) {
+      const canvas = canvasRef.current;
+      if (videoNode.videoWidth === 0) return;
+      canvas.width = videoNode.videoWidth;
+      canvas.height = videoNode.videoHeight;
+      canvas.getContext('2d')?.drawImage(videoNode, 0, 0, videoNode.videoWidth, videoNode.videoHeight);
+      canvas.toBlob((blob) => {
+        if (blob) {
+          const capturedFile = new File([blob], `capture-${Date.now()}.png`, { type: 'image/png' });
+          setFile(capturedFile);
+          if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
+          setImagePreviewUrl(URL.createObjectURL(capturedFile));
+        }
+      }, 'image/png');
+      handleCloseCamera();
+    }
+  };
+
+  const handleSave = async (data: Contact[]) => {
+    if (data.length === 0) { setIsDialogOpen(false); return; }
+    const contactToSave = data[0];
+    try {
+      let response;
+      if (dialogMode === 'edit' && editingIndex !== null && contactToSave._id) {
+        response = await fetch(`/api/contacts/${contactToSave._id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(contactToSave),
+        });
+      } else {
+        response = await fetch('/api/contacts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        });
+      }
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message);
+      await fetchContacts();
+      alert(result.message);
+    } catch (error: any) {
+      alert(`Error: ${error.message}`);
+    } 
+    finally {
+      setIsDialogOpen(false);
+      setEditingIndex(null);
+    }
+  };
+
+  const handleDeleteRow = async (index: number) => {
+    const contactToDelete = tableData[index];
+    if (!contactToDelete._id) return;
+    if (confirm('Are you sure you want to delete this contact permanently?')) {
+      try {
+        const response = await fetch(`/api/contacts/${contactToDelete._id}`, { method: 'DELETE' });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.message);
+        await fetchContacts();
+        alert(result.message);
+      } catch (error: any) {
+        alert(`Error: ${error.message}`);
+      }
+    }
+  };
+  
   const handleEditRow = (index: number, contact: Contact) => {
-    setEditingIndex(index);
     setExtractedInfo([contact]);
+    setDialogMode('edit');
+    setEditingIndex(index);
     setIsDialogOpen(true);
   };
 
@@ -290,21 +872,84 @@ export default function Home() {
         <header className="mb-8 text-center">
           <h1 className="text-3xl md:text-4xl font-bold">OCR Contact Extractor</h1>
           <p className="text-muted-foreground mt-2">
-            Upload an image to extract all names and phone numbers.
+            Upload, capture, or import a file to extract contact information.
           </p>
         </header>
 
-        <div className="flex flex-col sm:flex-row items-center justify-center gap-4 p-6 border rounded-lg bg-card shadow-sm mb-8">
-          <Input 
-            id="picture" 
-            type="file" 
-            onChange={handleFileChange} 
-            className="max-w-xs cursor-pointer"
-            accept="image/png, image/jpeg, image/webp"
-          />
-          <Button onClick={handleExtractClick} disabled={!file || isLoading}>
-            {isLoading ? 'Processing...' : 'Extract Information'}
-          </Button>
+        <div className="relative p-6 border rounded-lg bg-card shadow-sm mb-8">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
+            <div className="flex flex-col gap-3">
+              <h3 className="font-semibold text-center md:text-left">Option 1: Extract from Image</h3>
+              <div className="flex flex-col sm:flex-row items-center gap-2">
+                 <Input
+                  id="picture"
+                  type="file"
+                  ref={imageInputRef}
+                  onChange={handleFileChange}
+                  className="hidden"
+                  accept="image/png, image/jpeg, image/webp"
+                />
+                <Button 
+                  onClick={() => imageInputRef.current?.click()} 
+                  variant="outline" 
+                  className="w-full sm:w-auto"
+                >
+                  <FileImage className="mr-2 h-4 w-4" />
+                  Choose File
+                </Button>
+                <Button 
+                  onClick={handleOpenCamera} 
+                  variant="outline" 
+                  className="w-full sm:w-auto"
+                >
+                  <Camera className="mr-2 h-4 w-4" />
+                  Use Camera
+                </Button>
+              </div>
+              {file && (
+                <p className="text-sm text-muted-foreground text-center sm:text-left truncate">
+                  Selected: <strong>{file.name}</strong>
+                </p>
+              )}
+               <Button 
+                  onClick={handleExtractClick} 
+                  disabled={!file || isLoading} 
+                  className="w-full"
+                >
+                  {isLoading ? 'Processing...' : 'Extract from Image'}
+                </Button>
+            </div>
+            <div className="flex flex-col gap-3">
+              <h3 className="font-semibold text-center md:text-left">Option 2: Import from CSV</h3>
+              <div className="flex flex-col sm:flex-row items-center justify-center md:justify-start gap-4">
+                <Input
+                  type="file"
+                  ref={csvInputRef}
+                  onChange={handleCsvImport}
+                  className="hidden"
+                  accept=".csv"
+                />
+                <Button 
+                  onClick={() => csvInputRef.current?.click()} 
+                  variant="outline"
+                >
+                  <Upload className="mr-2 h-4 w-4" />
+                  Import CSV File
+                </Button>
+                
+                <DynamicCSVLink
+                  data={sampleCsvData}
+                  headers={csvHeaders}
+                  filename={"contacts-template.csv"}
+                  className="text-sm text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1 whitespace-nowrap"
+                >
+                  <FileText className="h-4 w-4" />
+                  Download Template
+                </DynamicCSVLink>
+              </div>
+            </div>
+          </div>
+          <div className="absolute top-4 bottom-4 left-1/2 -translate-x-1/2 w-px bg-border hidden md:block" />
         </div>
 
         {imagePreviewUrl && (
@@ -312,9 +957,9 @@ export default function Home() {
             <h2 className="text-xl font-semibold mb-4 text-center">Image Preview</h2>
             <div className="flex justify-center">
               <div className="p-2 border-2 border-dashed rounded-lg">
-                <img 
-                  src={imagePreviewUrl} 
-                  alt="Uploaded contact card" 
+                <img
+                  src={imagePreviewUrl}
+                  alt="Uploaded contact card"
                   className="max-w-md max-h-96 rounded-md object-contain"
                 />
               </div>
@@ -325,20 +970,21 @@ export default function Home() {
         <div className="flex justify-between items-center mb-4">
           <h2 className="text-2xl font-semibold">Saved Contacts</h2>
           {tableData.length > 0 && (
-            <CSVLink 
-              data={getCSVData()} 
+            <DynamicCSVLink
+              data={getCSVData()}
               headers={csvHeaders}
               filename={"contacts.csv"}
               className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-secondary text-secondary-foreground hover:bg-secondary/80 h-10 px-4 py-2"
             >
               <Download className="mr-2 h-4 w-4" />
               Download CSV
-            </CSVLink>
+            </DynamicCSVLink>
           )}
         </div>
         
-        <YourDataTable 
-          data={tableData} 
+        <YourDataTable
+          data={tableData}
+          isLoading={isTableLoading}
           handleDeleteRow={handleDeleteRow}
           handleEditRow={handleEditRow}
         />
@@ -348,6 +994,7 @@ export default function Home() {
           setIsOpen={setIsDialogOpen}
           data={extractedInfo}
           onSave={handleSave}
+          mode={dialogMode}
         />
         
         <AlertDialog open={isNotFoundDialogOpen} onOpenChange={setIsNotFoundDialogOpen}>
@@ -363,11 +1010,27 @@ export default function Home() {
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
+
+        <Dialog open={isCameraOpen} onOpenChange={(open) => !open && handleCloseCamera()}>
+          <DialogContent className="max-w-xl">
+            <DialogHeader>
+              <DialogTitle>Capture Image</DialogTitle>
+            </DialogHeader>
+            <video ref={videoRef} autoPlay playsInline muted className="w-full aspect-video rounded-md border bg-black" />
+            <canvas ref={canvasRef} className="hidden" />
+            <DialogFooter className="gap-2 sm:justify-center">
+              <Button variant="outline" onClick={handleCloseCamera}>Cancel</Button>
+              <Button onClick={handleCapture}>
+                <Camera className="mr-2 h-4 w-4" />
+                Capture Photo
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </main>
   );
 }
-
 
 === FILE: \src\components\columns.tsx ===
 
@@ -378,9 +1041,15 @@ import { Button } from "@/components/ui/button"
 import { Edit, Trash2 } from "lucide-react"
 
 export type Contact = {
+  _id?: string
   name: string
   phone: string
-  gender: string // Add gender field
+  gender: string
+  // FIX: Changed from undefined to null to match the date function's output
+  birthday?: string | null
+  anniversary?: string | null
+  status?: 'new' | 'duplicate' | 'invalid'
+  message?: string
 }
 
 export const columns: ColumnDef<Contact>[] = [
@@ -392,21 +1061,23 @@ export const columns: ColumnDef<Contact>[] = [
     accessorKey: "phone",
     header: "Phone Number",
   },
-  // NEW GENDER COLUMN
   {
     accessorKey: "gender",
     header: "Gender",
-    cell: ({ row }) => {
-      const gender = row.getValue("gender") as string;
-      // Capitalize the first letter for display
-      return <div className="capitalize">{gender}</div>;
-    },
+    cell: ({ row }) => <div className="capitalize">{row.getValue("gender")}</div>,
+  },
+  {
+    accessorKey: "birthday",
+    header: "Birthday",
+  },
+  {
+    accessorKey: "anniversary",
+    header: "Anniversary",
   },
   {
     id: "actions",
     header: () => <div className="text-right">Actions</div>,
     cell: ({ row, table }) => {
-      // ... (action cell code is unchanged)
       const contact = row.original
       return (
         <div className="text-right">
@@ -433,339 +1104,241 @@ export const columns: ColumnDef<Contact>[] = [
   },
 ]
 
+
 === FILE: \src\components\edit-dialog.tsx ===
 
 "use client"
 
-import { useEffect, useState } from "react"
-import React from "react" // Import React for Fragments
+import { useEffect, useState, ReactNode } from "react"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Input } from "@/components/ui/input"
-import { Trash2, PlusCircle, AlertCircle } from "lucide-react"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Trash2, PlusCircle, AlertCircle, CheckCircle, Copy, Info } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { parsePhoneNumberFromString, CountryCode } from "libphonenumber-js"
+import { Contact } from "./columns"
 
-interface ContactInfo {
-  name: string;
-  phone: string;
-  gender: string;
-}
+type DialogMode = 'csv' | 'ocr' | 'edit';
 
 interface EditDialogProps {
   isOpen: boolean;
   setIsOpen: (isOpen: boolean) => void;
-  data: ContactInfo[];
-  onSave: (data: ContactInfo[]) => void;
-}
-
-interface DuplicateInfo {
-  isDuplicate: boolean;
-  originalIndex: number | null;
+  data: Contact[];
+  onSave: (data: Contact[]) => void;
+  mode: DialogMode;
 }
 
 const DEFAULT_COUNTRY: CountryCode = "IN";
-type AcceptType = string;
-const ACCEPT_TYPE: AcceptType = "any";
-
-const normalizeAndParse = (raw: string, country?: CountryCode) => {
-  const input = raw?.trim() ?? "";
-  if (!input) return { parsed: null as ReturnType<typeof parsePhoneNumberFromString> | null, normalized: "" };
-  const parsedIntl = parsePhoneNumberFromString(input);
-  if (parsedIntl) return { parsed: parsedIntl, normalized: parsedIntl.number };
-  const parsedWithCountry = parsePhoneNumberFromString(input, country || DEFAULT_COUNTRY);
-  if (parsedWithCountry) return { parsed: parsedWithCountry, normalized: parsedWithCountry.number };
-  const justDigitsPlus = input.replace(/[^\d+]/g, "");
-  const retryIntl = parsePhoneNumberFromString(justDigitsPlus);
-  if (retryIntl) return { parsed: retryIntl, normalized: retryIntl.number };
-  const retryCountry = parsePhoneNumberFromString(justDigitsPlus, country || DEFAULT_COUNTRY);
-  if (retryCountry) return { parsed: retryCountry, normalized: retryCountry.number };
-  return { parsed: null, normalized: "" };
-};
-
-// ================== UPDATED VALIDATION FUNCTION ==================
-const getValidationError = (raw: string, country?: CountryCode): string | null => {
-  if (!raw || !raw.trim()) return null;
-
-  const { parsed } = normalizeAndParse(raw, country);
-
-  if (!parsed) {
-    return "Invalid phone number format";
-  }
-
-  // 1. General validation by the library
-  if (!parsed.isValid()) {
-    return "Invalid phone number";
-  }
-
-  // 2. Stricter custom rule for India
-  if (parsed.country === 'IN') {
-    const nationalNumber = parsed.nationalNumber;
-    // Valid Indian numbers must be 10 digits and start with 6, 7, 8, or 9.
-    if (!/^[6789]\d{9}$/.test(nationalNumber)) {
-      return "Invalid Indian number";
-    }
-  }
-
-  // 3. Mobile-only check (if enabled)
-  if (ACCEPT_TYPE === "mobile") {
-    const t: string | undefined = parsed.getType?.();
-    if (t && t !== "MOBILE" && t !== "FIXED_LINE_OR_MOBILE") {
-      return "Must be a mobile number";
-    }
-  }
-
-  return null;
-};
-// =================================================================
 
 const toE164 = (raw: string, country?: CountryCode): string => {
-  const { parsed } = normalizeAndParse(raw, country);
+  const parsed = parsePhoneNumberFromString(raw?.trim() ?? "", country || DEFAULT_COUNTRY);
   return parsed?.number ?? (raw?.trim() ?? "");
 };
 
-export default function EditDialog({ isOpen, setIsOpen, data, onSave }: EditDialogProps) {
-  const [editedData, setEditedData] = useState<ContactInfo[]>([]);
-  const [validationErrors, setValidationErrors] = useState<Record<number, string>>({});
+const getValidationError = (name: string, phone: string): string | null => {
+  if (!name || !name.trim()) return "Name is required.";
+  if (!phone || !phone.trim()) return "Phone is required.";
+  const parsed = parsePhoneNumberFromString(phone, DEFAULT_COUNTRY);
+  if (!parsed || !parsed.isValid()) {
+    return "Invalid phone number format.";
+  }
+  if (parsed.country === 'IN') {
+    if (!/^[6789]\d{9}$/.test(parsed.nationalNumber)) {
+      return "Invalid Indian mobile number.";
+    }
+  }
+  return null;
+};
+
+export default function EditDialog({ isOpen, setIsOpen, data, onSave, mode }: EditDialogProps) {
+  const [editedData, setEditedData] = useState<Contact[]>([]);
+  const [selectedRows, setSelectedRows] = useState<Record<number, boolean>>({});
+
+  const runInternalValidation = (contacts: Contact[]): Contact[] => {
+    const seenPhones = new Set<string>();
+    return contacts.map(contact => {
+      if (contact.status === 'duplicate' && contact.message?.includes('Exists in DB')) {
+        seenPhones.add(toE164(contact.phone));
+        return contact;
+      }
+      const phoneE164 = toE164(contact.phone);
+      const validationError = getValidationError(contact.name, contact.phone);
+      if (validationError) {
+        return { ...contact, status: 'invalid', message: validationError };
+      }
+      if (phoneE164 && seenPhones.has(phoneE164)) {
+          return { ...contact, status: 'duplicate', message: 'Duplicate within this list.' };
+      }
+      if(phoneE164) seenPhones.add(phoneE164);
+      return { ...contact, status: 'new', message: 'Ready to save.' };
+    });
+  };
 
   useEffect(() => {
     if (data) {
-      setEditedData(data);
-      validateAllPhones(data);
+        const processedData = runInternalValidation(data);
+        setEditedData(processedData);
+        const initialSelection: Record<number, boolean> = {};
+        if (mode === 'csv') {
+            processedData.forEach((contact, index) => {
+            if (contact.status === 'new') initialSelection[index] = true;
+            });
+        }
+        setSelectedRows(initialSelection);
     }
-  }, [data]);
+  }, [data, mode]);
 
-  const validatePhone = (phone: string, index: number, country?: CountryCode) => {
-    const error = getValidationError(phone, country);
-    if (error) {
-      setValidationErrors(prev => ({ ...prev, [index]: error }));
-    } else {
-      setValidationErrors(prev => {
-        const next = { ...prev };
-        delete next[index];
-        return next;
-      });
-    }
-  };
-
-  const validateAllPhones = (contacts: ContactInfo[]) => {
-    const errors: Record<number, string> = {};
-    contacts.forEach((contact, index) => {
-      const error = getValidationError(contact.phone);
-      if (error) errors[index] = error;
+  const handleInputChange = (index: number, field: 'name' | 'phone' | 'gender' | 'birthday' | 'anniversary', value: string) => {
+    setEditedData(prevData => {
+      const updated = [...prevData];
+      updated[index] = { ...updated[index], [field]: value };
+      return runInternalValidation(updated);
     });
-    setValidationErrors(errors);
   };
-
-  const handleInputChange = (index: number, field: 'name' | 'phone' | 'gender', value: string) => {
-    const updated = [...editedData];
-    // @ts-ignore
-    updated[index][field] = value;
-    setEditedData(updated);
-    if (field === 'phone') {
-      validatePhone(value, index);
-    }
-  };
-
+  
   const removeContact = (index: number) => {
-    const next = editedData.filter((_, i) => i !== index);
-    setEditedData(next);
-    validateAllPhones(next);
+    setEditedData(prev => runInternalValidation(prev.filter((_, i) => i !== index)));
   };
 
   const addContact = () => {
-    setEditedData([
-      ...editedData,
-      { name: "", phone: "", gender: "unknown" },
-    ]);
-  };
-
-  const getDuplicateInfo = (currentIndex: number): DuplicateInfo => {
-    const currentContact = editedData[currentIndex];
-    const currentPhone = currentContact.phone.trim();
-    if (!currentPhone) return { isDuplicate: false, originalIndex: null };
-    const currentE164 = toE164(currentPhone);
-    for (let i = 0; i < currentIndex; i++) {
-      const prevContact = editedData[i];
-      const prevE164 = toE164(prevContact.phone);
-      if (prevE164 && currentE164 && prevE164 === currentE164) {
-        return { isDuplicate: true, originalIndex: i };
-      }
-    }
-    return { isDuplicate: false, originalIndex: null };
-  };
+    const newContact: Contact = { name: "", phone: "", gender: "unknown", status: 'invalid', message: 'Name is required.' };
+    setEditedData(prev => [...prev, newContact]);
+  }
 
   const handleSaveClick = () => {
-    if (Object.keys(validationErrors).length > 0) {
-      alert("Please fix the invalid phone numbers before saving.");
-      return;
-    }
-    const hasDuplicates = editedData.some((_, index) => getDuplicateInfo(index).isDuplicate);
-    if (hasDuplicates) {
-      if (!confirm("Duplicate phone numbers were found. Are you sure you want to save?")) {
+    if (mode === 'csv') {
+      const dataToSave = editedData.filter((_, index) => selectedRows[index]);
+      onSave(dataToSave);
+    } else {
+      if (editedData.some(c => c.status === 'invalid')) {
+        alert("Please fix all invalid contacts before saving.");
         return;
       }
+      const dataToSave = editedData.filter(c => c.status !== 'duplicate');
+      onSave(dataToSave);
     }
-    const finalData = editedData
-      .map(c => ({
-        ...c,
-        phone: toE164(c.phone),
-      }))
-      .filter(contact => contact.name.trim() !== "" || contact.phone.trim() !== "");
-    onSave(finalData);
+  };
+  
+  const handleRemoveDuplicates = () => {
+    setEditedData(prev => prev.filter(c => c.status !== 'duplicate'));
   };
 
-  const handleDeleteDuplicates = () => {
-    const nonDuplicates = editedData.filter((_, index) => !getDuplicateInfo(index).isDuplicate);
-    setEditedData(nonDuplicates);
-    validateAllPhones(nonDuplicates);
+  const handleRemoveInvalids = () => {
+    setEditedData(prev => prev.filter(c => c.status !== 'invalid'));
   };
 
-  const hasDuplicates = editedData.some((_, index) => getDuplicateInfo(index).isDuplicate);
+  const getStatusIcon = (status?: string): ReactNode => {
+    switch (status) {
+      case 'new': return <CheckCircle className="h-4 w-4 text-green-500" />;
+      case 'duplicate': return <Copy className="h-4 w-4 text-yellow-500" />;
+      case 'invalid': return <AlertCircle className="h-4 w-4 text-red-500" />;
+      default: return null;
+    }
+  };
+  
+  const getRowClass = (status?: string): string => {
+    if (status === 'duplicate') return "bg-yellow-50 dark:bg-yellow-900/20";
+    if (status === 'invalid') return "bg-red-50 dark:bg-red-900/20";
+    return "";
+  };
+  
+  const hasDuplicates = editedData.some(c => c.status === 'duplicate');
+  const hasInvalids = editedData.some(c => c.status === 'invalid');
+
+  const tableHeaders: ReactNode[] = [];
+  if (mode === 'csv') {
+    tableHeaders.push(<TableHead key="select" className="w-[50px]"><Checkbox 
+        onCheckedChange={(checked) => {
+            const newSelection: Record<number, boolean> = {};
+            if(checked) editedData.forEach((c, i) => { if(c.status === 'new') newSelection[i] = true; });
+            setSelectedRows(newSelection);
+        }}
+    /></TableHead>);
+  }
+  tableHeaders.push(<TableHead key="name">Name</TableHead>);
+  tableHeaders.push(<TableHead key="phone">Phone Number</TableHead>);
+  tableHeaders.push(<TableHead key="gender">Gender</TableHead>);
+  tableHeaders.push(<TableHead key="birthday">Birthday</TableHead>);
+  tableHeaders.push(<TableHead key="anniversary">Anniversary</TableHead>);
+  if (mode !== 'edit') {
+    tableHeaders.push(<TableHead key="status">Status</TableHead>);
+  }
+  if (mode !== 'csv') {
+    tableHeaders.push(<TableHead key="actions" className="text-right">Actions</TableHead>);
+  }
 
   return (
     <Dialog open={isOpen} onOpenChange={setIsOpen}>
-      <DialogContent className="sm:max-w-3xl">
-        <TooltipProvider>
-          <DialogHeader>
-            <DialogTitle>Verify Information</DialogTitle>
-            <DialogDescription>
-              Review and edit contacts. The AI has predicted the gender.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="max-h-[60vh] overflow-y-auto pr-2">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Phone Number</TableHead>
-                  <TableHead>Gender</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
+      <DialogContent className="sm:max-w-7xl">
+        <DialogHeader>
+          <DialogTitle>Verify Information</DialogTitle>
+          <DialogDescription>
+            {mode === 'csv' && "Review contacts from your CSV. Only selected rows will be imported."}
+            {mode === 'ocr' && "Review contacts from the image. Duplicates and invalid rows will not be saved."}
+            {mode === 'edit' && "Edit the contact's details before saving."}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="max-h-[60vh] overflow-y-auto pr-2">
+          <Table>
+            <TableHeader>
+              <TableRow>{tableHeaders}</TableRow>
+            </TableHeader>
+            <TableBody>
+              {editedData.map((contact, index) => (
+                <TableRow key={index} className={getRowClass(contact.status)}>
+                  {mode === 'csv' && <TableCell><Checkbox 
+                    checked={selectedRows[index] || false}
+                    onCheckedChange={(checked) => setSelectedRows(prev => ({...prev, [index]: !!checked}))}
+                    disabled={contact.status !== 'new'}
+                  /></TableCell>}
+                  <TableCell><Input value={contact.name} onChange={(e) => handleInputChange(index, 'name', e.target.value)} /></TableCell>
+                  <TableCell><Input value={contact.phone} onChange={(e) => handleInputChange(index, 'phone', e.target.value)} /></TableCell>
+                  <TableCell>
+                    <Select value={contact.gender} onValueChange={(value) => handleInputChange(index, 'gender', value)}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="male">Male</SelectItem>
+                        <SelectItem value="female">Female</SelectItem>
+                        <SelectItem value="unknown">Unknown</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </TableCell>
+                  <TableCell><Input type="date" value={contact.birthday || ''} onChange={(e) => handleInputChange(index, 'birthday', e.target.value)} /></TableCell>
+                  <TableCell><Input type="date" value={contact.anniversary || ''} onChange={(e) => handleInputChange(index, 'anniversary', e.target.value)} /></TableCell>
+                  {(mode !== 'edit') && <TableCell><div className="flex items-center gap-2" title={contact.message}>{getStatusIcon(contact.status)} <span className="text-xs text-muted-foreground truncate">{contact.message}</span></div></TableCell>}
+                  {(mode !== 'csv') && <TableCell className="text-right"><Button variant="ghost" size="icon" onClick={() => removeContact(index)}><Trash2 className="h-4 w-4 text-red-500" /></Button></TableCell>}
                 </TableRow>
-              </TableHeader>
-              <TableBody>
-                {editedData.map((contact, index) => {
-                  const duplicateInfo = getDuplicateInfo(index);
-                  const isInvalid = !!validationErrors[index];
-                  const highlightClass = duplicateInfo.isDuplicate
-                    ? "bg-red-100 dark:bg-red-900/50 hover:bg-red-200 dark:hover:bg-red-800/60"
-                    : "";
-                  const tableRow = (
-                      <TableRow className={cn("transition-colors", highlightClass)}>
-                        <TableCell>
-                          <Input
-                            value={contact.name}
-                            onChange={(e) => handleInputChange(index, 'name', e.target.value)}
-                            placeholder="Enter name..."
-                            className="bg-transparent"
-                          />
-                        </TableCell>
-                        <TableCell className="align-top">
-                          <Input
-                            value={contact.phone}
-                            onChange={(e) => handleInputChange(index, 'phone', e.target.value)}
-                            placeholder="e.g., +44 7700 900123"
-                            className={cn(
-                              "bg-transparent",
-                              isInvalid && "border-red-500 text-red-900 focus-visible:ring-red-500"
-                            )}
-                          />
-                          {isInvalid && (
-                            <p className="text-xs text-red-600 mt-1 flex items-center">
-                              <AlertCircle className="h-3 w-3 mr-1 flex-shrink-0" />
-                              {validationErrors[index]}
-                            </p>
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          <Select
-                            value={contact.gender}
-                            onValueChange={(value) => handleInputChange(index, 'gender', value)}
-                          >
-                            <SelectTrigger>
-                              <SelectValue placeholder="Select gender" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="male">Male</SelectItem>
-                              <SelectItem value="female">Female</SelectItem>
-                              <SelectItem value="unknown">Unknown</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <Button variant="ghost" size="icon" onClick={() => removeContact(index)}>
-                            <Trash2 className="h-4 w-4 text-red-500" />
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                  );
-
-                  return (
-                    <React.Fragment key={index}>
-                      {duplicateInfo.isDuplicate ? (
-                        <Tooltip delayDuration={300}>
-                          <TooltipTrigger asChild>{tableRow}</TooltipTrigger>
-                          <TooltipContent>
-                            <p>Duplicate of row #{duplicateInfo.originalIndex! + 1} ({editedData[duplicateInfo.originalIndex!].name})</p>
-                          </TooltipContent>
-                        </Tooltip>
-                      ) : (
-                        tableRow
-                      )}
-                    </React.Fragment>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          </div>
-          <div className="pt-4">
-            <Button variant="outline" className="w-full" onClick={addContact}>
-              <PlusCircle className="mr-2 h-4 w-4" /> Add Contact
-            </Button>
-          </div>
-          <DialogFooter className="sm:justify-between">
-            {hasDuplicates ? (
-              <Button variant="destructive" onClick={handleDeleteDuplicates}>
-                Delete all Duplicates
-              </Button>
-            ) : (
-              <div />
-            )}
-            <Button type="submit" onClick={handleSaveClick}>Save All Contacts</Button>
-          </DialogFooter>
-        </TooltipProvider>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+        
+        <div className="pt-4 flex flex-wrap gap-2">
+          {(mode === 'ocr' || mode === 'edit') && 
+            <Button variant="outline" onClick={addContact}><PlusCircle className="mr-2 h-4 w-4" /> Add Contact</Button>
+          }
+          {hasDuplicates && 
+            <Button variant="outline" onClick={handleRemoveDuplicates} className="text-yellow-600 border-yellow-300 hover:bg-yellow-50">Remove Duplicates</Button>
+          }
+          {hasInvalids && 
+            <Button variant="outline" onClick={handleRemoveInvalids} className="text-red-600 border-red-300 hover:bg-red-50">Remove Invalid Rows</Button>
+          }
+        </div>
+        
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setIsOpen(false)}>Cancel</Button>
+          <Button onClick={handleSaveClick}>
+            {mode === 'csv' ? 'Save Selected Contacts' : 'Save Contacts'}
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );
 }
+
 
 === FILE: \src\components\your-data-table.tsx ===
 
@@ -787,15 +1360,16 @@ import {
 } from "@/components/ui/table"
 import { columns, Contact } from "./columns"
 
-// UPDATED: Add handler functions to the props
 interface DataTableProps<TData, TValue> {
   data: TData[]
+  isLoading: boolean
   handleDeleteRow: (index: number) => void
   handleEditRow: (index: number, contact: Contact) => void
 }
 
 export function YourDataTable<TData, TValue>({
   data,
+  isLoading,
   handleDeleteRow,
   handleEditRow,
 }: DataTableProps<TData, TValue>) {
@@ -803,7 +1377,6 @@ export function YourDataTable<TData, TValue>({
     data,
     columns: columns as ColumnDef<TData, TValue>[],
     getCoreRowModel: getCoreRowModel(),
-    // UPDATED: Pass the handler functions into the table's "meta" property
     meta: {
       handleDeleteRow,
       handleEditRow,
@@ -832,7 +1405,13 @@ export function YourDataTable<TData, TValue>({
           ))}
         </TableHeader>
         <TableBody>
-          {table.getRowModel().rows?.length ? (
+          {isLoading ? (
+            <TableRow>
+              <TableCell colSpan={columns.length} className="h-24 text-center">
+                Loading contacts...
+              </TableCell>
+            </TableRow>
+          ) : table.getRowModel().rows?.length ? (
             table.getRowModel().rows.map((row) => (
               <TableRow
                 key={row.id}
@@ -848,7 +1427,7 @@ export function YourDataTable<TData, TValue>({
           ) : (
             <TableRow>
               <TableCell colSpan={columns.length} className="h-24 text-center">
-                No contacts added yet.
+                No contacts saved in the database.
               </TableCell>
             </TableRow>
           )}
@@ -857,6 +1436,79 @@ export function YourDataTable<TData, TValue>({
     </div>
   )
 }
+
+=== FILE: \src\lib\dateUtils.ts ===
+
+import { format, isValid, parseISO } from 'date-fns';
+
+/**
+ * Normalizes a date string from various formats into 'yyyy-MM-dd'.
+ * @param dateInput The date string to normalize (e.g., "18/09/2025", "2025-09-18", etc.)
+ * @returns A string in 'yyyy-MM-dd' format, or null if the input is invalid or empty.
+ */
+export function normalizeDateString(dateInput: string | null | undefined): string | null {
+  if (!dateInput || typeof dateInput !== 'string' || dateInput.trim() === '') {
+    return null;
+  }
+
+  // The native Date constructor is surprisingly good at parsing common formats
+  const date = new Date(dateInput);
+
+  // For ISO strings like "YYYY-MM-DDTHH:mm:ss.sssZ", the timezone can cause an off-by-one day error.
+  // We can correct this by parsing it as ISO and grabbing the UTC parts.
+  if (dateInput.includes('T') && dateInput.includes('Z')) {
+      const parsedIso = parseISO(dateInput);
+      if (isValid(parsedIso)) {
+        return format(parsedIso, 'yyyy-MM-dd');
+      }
+  }
+
+  if (isValid(date)) {
+    // Check if the constructor misinterpreted a number as a year (e.g., '10-12-23')
+    // This is a simple heuristic to avoid common misinterpretations
+    if(date.getFullYear() < 1900) return null;
+
+    return format(date, 'yyyy-MM-dd');
+  }
+
+  return null; // Return null if the date string is not valid
+}
+
+=== FILE: \src\lib\mongodb.ts ===
+
+import { MongoClient } from 'mongodb'
+
+if (!process.env.MONGODB_URI) {
+  throw new Error('Invalid/Missing environment variable: "MONGODB_URI"')
+}
+
+const uri = process.env.MONGODB_URI
+const options = {}
+
+let client
+let clientPromise: Promise<MongoClient>
+
+if (process.env.NODE_ENV === 'development') {
+  // In development mode, use a global variable so that the value
+  // is preserved across module reloads caused by HMR (Hot Module Replacement).
+  let globalWithMongo = global as typeof globalThis & {
+    _mongoClientPromise?: Promise<MongoClient>
+  }
+
+  if (!globalWithMongo._mongoClientPromise) {
+    client = new MongoClient(uri, options)
+    globalWithMongo._mongoClientPromise = client.connect()
+  }
+  clientPromise = globalWithMongo._mongoClientPromise
+} else {
+  // In production mode, it's best to not use a global variable.
+  client = new MongoClient(uri, options)
+  clientPromise = client.connect()
+}
+
+// Export a module-scoped MongoClient promise. By doing this in a
+// separate module, the client can be shared across functions.
+export default clientPromise
 
 === FILE: \src\lib\utils.ts ===
 

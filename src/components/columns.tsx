@@ -5,10 +5,13 @@ import { Button } from "@/components/ui/button"
 import { Edit, Trash2 } from "lucide-react"
 
 export type Contact = {
-  _id?: string;
+  _id?: string
   name: string
   phone: string
-  gender: string 
+  gender: string
+  // FIX: Changed from undefined to null to match the date function's output
+  birthday?: string | null
+  anniversary?: string | null
   status?: 'new' | 'duplicate' | 'invalid'
   message?: string
 }
@@ -22,21 +25,23 @@ export const columns: ColumnDef<Contact>[] = [
     accessorKey: "phone",
     header: "Phone Number",
   },
-  // NEW GENDER COLUMN
   {
     accessorKey: "gender",
     header: "Gender",
-    cell: ({ row }) => {
-      const gender = row.getValue("gender") as string;
-      // Capitalize the first letter for display
-      return <div className="capitalize">{gender}</div>;
-    },
+    cell: ({ row }) => <div className="capitalize">{row.getValue("gender")}</div>,
+  },
+  {
+    accessorKey: "birthday",
+    header: "Birthday",
+  },
+  {
+    accessorKey: "anniversary",
+    header: "Anniversary",
   },
   {
     id: "actions",
     header: () => <div className="text-right">Actions</div>,
     cell: ({ row, table }) => {
-      // ... (action cell code is unchanged)
       const contact = row.original
       return (
         <div className="text-right">

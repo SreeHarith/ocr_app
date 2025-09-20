@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import clientPromise from '@/lib/mongodb';
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
 import { Contact } from '@/components/columns';
+import { normalizeDateString } from '@/lib/dateUtils';
 
 async function getGender(name: string, apiKey: string) {
   const firstName = name.split(' ')[0];
@@ -24,7 +25,6 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    // Step 1: Perform OCR to get initial contacts
     const ocrResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -32,14 +32,14 @@ export async function POST(request: NextRequest) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'qwen/qwen2.5-vl-72b-instruct:free',
+        model: 'qwen/qwen2.5-vl-72b-instruct',
         messages: [
           {
             role: 'user',
             content: [
               {
                 type: 'text',
-                text: 'You are an expert OCR system. Analyze the image and find ALL names and phone numbers. Return ONLY a single, clean JSON array. Each object must have "name" and "phone". Example: [{"name": "John Doe", "phone": "111-222-3300"}]',
+                text: 'You are an expert OCR system. Analyze the image to find ALL names, phone numbers, birthdays, and anniversaries. Return ONLY a single, clean JSON array. Each object must have "name", "phone", "birthday", and "anniversary" keys. If a field is not found, its value should be null. Example: [{"name": "John Doe", "phone": "1112223300", "birthday": "1990-05-15", "anniversary": null}]',
               },
               { type: 'image_url', image_url: { url: imageUrl } },
             ],
@@ -57,11 +57,11 @@ export async function POST(request: NextRequest) {
 
     const content = ocrData.choices[0].message.content;
     const jsonString = content.match(/```json\n([\s\S]*?)\n```/)?.[1] || content;
-    const initialContacts: { name: string; phone: string }[] = JSON.parse(jsonString);
+    const initialContacts: Contact[] = JSON.parse(jsonString);
 
     const contactsWithGender = await Promise.all(
       initialContacts.map(async (contact) => {
-        const gender = await getGender(contact.name, genderApiKey);
+        const gender = contact.gender || await getGender(contact.name, genderApiKey);
         return { ...contact, gender };
       })
     );
@@ -81,19 +81,23 @@ export async function POST(request: NextRequest) {
         if (!contact.name || !contact.phone) {
             return { ...contact, status: 'invalid', message: 'Missing name or phone.' };
         }
-
-        // ================== ADD THIS VALIDATION BLOCK BACK IN ==================
+        
         const phoneNumber = parsePhoneNumberFromString(contact.phone, 'IN');
         if (!phoneNumber || !phoneNumber.isValid()) {
             return { ...contact, status: 'invalid', message: 'Invalid phone number format.' };
         }
-        // =======================================================================
         
         if (existingPhones.has(contact.phone)) {
             const existing = existingPhones.get(contact.phone);
             return { ...contact, status: 'duplicate', message: `Exists in DB as '${existing?.name}'.` };
         }
-        return { ...contact, status: 'new', message: 'Ready to import.' };
+        return { 
+            ...contact, 
+            status: 'new', 
+            message: 'Ready to import.',
+            birthday: normalizeDateString(contact.birthday),
+            anniversary: normalizeDateString(contact.anniversary)
+        };
     });
 
     return NextResponse.json(validatedContacts);
@@ -103,3 +107,4 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Failed to process the image.' }, { status: 500 });
   }
 }
+

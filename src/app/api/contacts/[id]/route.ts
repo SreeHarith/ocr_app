@@ -1,21 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server';
 import clientPromise from '@/lib/mongodb';
 import { ObjectId } from 'mongodb';
+import { normalizeDateString } from '@/lib/dateUtils';
 
-// Helper to check for valid ObjectId
 function isValidObjectId(id: string) {
     return ObjectId.isValid(id) && String(new ObjectId(id)) === id;
 }
 
-// UPDATE a contact
-export async function PUT(request: NextRequest, { params }: { params: { id: string } }) {
-  const id = params.id;
+// FIX: Destructure 'id' directly from params
+export async function PUT(request: NextRequest, { params: { id } }: { params: { id: string } }) {
   if (!isValidObjectId(id)) {
     return NextResponse.json({ message: 'Invalid Contact ID format' }, { status: 400 });
   }
 
   try {
-    const { name, phone, gender } = await request.json();
+    const { name, phone, gender, birthday, anniversary } = await request.json();
     if (!name || !phone || !gender) {
         return NextResponse.json({ message: 'Missing required fields' }, { status: 400 });
     }
@@ -24,7 +23,14 @@ export async function PUT(request: NextRequest, { params }: { params: { id: stri
     const db = client.db();
     const result = await db.collection('contacts').updateOne(
       { _id: new ObjectId(id) },
-      { $set: { name, phone, gender } }
+      { $set: { 
+          name, 
+          phone, 
+          gender, 
+          birthday: normalizeDateString(birthday),
+          anniversary: normalizeDateString(anniversary) 
+        } 
+      }
     );
 
     if (result.matchedCount === 0) {
@@ -33,13 +39,13 @@ export async function PUT(request: NextRequest, { params }: { params: { id: stri
 
     return NextResponse.json({ message: 'Contact updated successfully' }, { status: 200 });
   } catch (error) {
-    return NextResponse.json({ message: 'Failed to update contact' }, { status: 500 });
+    console.error('Failed to update contact:', error);
+    return NextResponse.json({ message: 'Failed to update contact.' }, { status: 500 });
   }
 }
 
-// DELETE a contact
-export async function DELETE(request: NextRequest, { params }: { params: { id: string } }) {
-    const id = params.id;
+// FIX: Destructure 'id' directly from params
+export async function DELETE(request: NextRequest, { params: { id } }: { params: { id: string } }) {
     if (!isValidObjectId(id)) {
         return NextResponse.json({ message: 'Invalid Contact ID format' }, { status: 400 });
     }
@@ -55,6 +61,7 @@ export async function DELETE(request: NextRequest, { params }: { params: { id: s
   
       return NextResponse.json({ message: 'Contact deleted successfully' }, { status: 200 });
     } catch (error) {
-      return NextResponse.json({ message: 'Failed to delete contact' }, { status: 500 });
+      console.error('Failed to delete contact:', error);
+      return NextResponse.json({ message: 'Failed to delete contact.' }, { status: 500 });
     }
 }

@@ -97,12 +97,14 @@ export default function Home() {
   const csvHeaders = [
     { label: "name", key: "name" },
     { label: "phone", key: "phone" },
-    { label: "gender", key: "gender" }
+    { label: "gender", key: "gender" },
+    { label: "birthday", key: "birthday" },
+    { label: "anniversary", key: "anniversary" }
   ];
   
   const sampleCsvData = [
-    { name: "John Doe", phone: "\t+919876543210", gender: "male" },
-    { name: "Jane Smith", phone: "\t+917890123456", gender: "female" },
+    { name: "Rohan Sharma", phone: "\t+919876543210", gender: "male", birthday: "1992-03-10", anniversary: "" },
+    { name: "Priya Patel", phone: "\t+917890123456", gender: "female", birthday: "1995-11-22", anniversary: "2020-06-01" },
   ];
 
   const getCSVData = () => {
@@ -170,11 +172,25 @@ export default function Home() {
         header: true, skipEmptyLines: true,
         complete: (results) => {
           const headers = results.meta.fields || [];
-          if (!headers.some(h => h.toLowerCase().includes('name')) || !headers.some(h => h.toLowerCase().includes('phone'))) {
+          
+          const nameHeader = headers.find(h => h.toLowerCase().includes('name'));
+          const phoneHeader = headers.find(h => h.toLowerCase().includes('phone'));
+          const genderHeader = headers.find(h => h.toLowerCase().includes('gender'));
+          const birthdayHeader = headers.find(h => h.toLowerCase().includes('birthday'));
+          const anniversaryHeader = headers.find(h => h.toLowerCase().includes('anniversary'));
+
+          if (!nameHeader || !phoneHeader) {
             return reject(new Error("Import failed: CSV must contain 'name' and 'phone' columns."));
           }
-          const parsed = results.data.map((row: any) => ({ name: row.name || row.Name || '', phone: row.phone || row['Phone Number'] || '', gender: (row.gender || row.Gender || 'unknown').toLowerCase() }));
-          resolve(parsed);
+
+          const parsedContacts: Contact[] = results.data.map((row: any) => ({
+            name: row[nameHeader] || '',
+            phone: row[phoneHeader] || '',
+            gender: (genderHeader ? row[genderHeader] : 'unknown').toLowerCase(),
+            birthday: birthdayHeader ? row[birthdayHeader] : undefined,
+            anniversary: anniversaryHeader ? row[anniversaryHeader] : undefined,
+          }));
+          resolve(parsedContacts);
         },
         error: (error: any) => reject(error),
       });
@@ -343,13 +359,14 @@ export default function Home() {
                   Selected: <strong>{file.name}</strong>
                 </p>
               )}
+               {/* ===== FIX: This button is now INSIDE the flex container ===== */}
                <Button 
-                  onClick={handleExtractClick} 
-                  disabled={!file || isLoading} 
-                  className="w-full"
-                >
-                  {isLoading ? 'Processing...' : 'Extract from Image'}
-                </Button>
+                onClick={handleExtractClick} 
+                disabled={!file || isLoading} 
+                className="w-full"
+              >
+                {isLoading ? 'Processing...' : 'Extract from Image'}
+              </Button>
             </div>
             <div className="flex flex-col gap-3">
               <h3 className="font-semibold text-center md:text-left">Option 2: Import from CSV</h3>
@@ -381,6 +398,7 @@ export default function Home() {
               </div>
             </div>
           </div>
+          {/* ===== FIX: Corrected the centering class from -translate-x-12 to -translate-x-1/2 ===== */}
           <div className="absolute top-4 bottom-4 left-1/2 -translate-x-1/2 w-px bg-border hidden md:block" />
         </div>
 
@@ -444,7 +462,7 @@ export default function Home() {
         </AlertDialog>
 
         <Dialog open={isCameraOpen} onOpenChange={(open) => !open && handleCloseCamera()}>
-          <DialogContent className="max-w-xl">
+          <DialogContent className="sm:max-w-xl">
             <DialogHeader>
               <DialogTitle>Capture Image</DialogTitle>
             </DialogHeader>

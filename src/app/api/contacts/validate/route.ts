@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import clientPromise from '@/lib/mongodb';
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
 import { Contact } from '@/components/columns';
+import { normalizeDateString } from '@/lib/dateUtils';
 
 async function getGender(name: string, apiKey: string) {
   const firstName = name.split(' ')[0];
@@ -36,7 +37,6 @@ export async function POST(request: NextRequest) {
     const validatedContacts: Contact[] = [];
     const seenPhonesInCSV = new Set<string>();
 
-    // Using a sequential for...of loop to prevent race conditions
     for (const contact of normalizedContacts) {
       if (!contact.name) {
         validatedContacts.push({ ...contact, status: 'invalid', message: 'Name is missing.' });
@@ -53,7 +53,6 @@ export async function POST(request: NextRequest) {
         continue;
       }
       
-      // FIX: Now both contacts with a number that exists in the DB will be flagged
       if (existingPhones.has(contact.phone)) {
         const existingContact = existingPhones.get(contact.phone);
         validatedContacts.push({ ...contact, status: 'duplicate', message: `Exists in DB as '${existingContact?.name}'.` });
@@ -71,7 +70,13 @@ export async function POST(request: NextRequest) {
         contact.gender = await getGender(contact.name, genderApiKey);
       }
       
-      validatedContacts.push({ ...contact, status: 'new', message: 'Ready to import.' });
+      validatedContacts.push({ 
+        ...contact, 
+        status: 'new', 
+        message: 'Ready to import.',
+        birthday: normalizeDateString(contact.birthday),
+        anniversary: normalizeDateString(contact.anniversary)
+      });
     }
 
     return NextResponse.json(validatedContacts, { status: 200 });
@@ -80,3 +85,4 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ message: 'Failed to validate contacts.' }, { status: 500 });
   }
 }
+
