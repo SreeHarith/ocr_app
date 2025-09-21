@@ -9,12 +9,22 @@ export type Contact = {
   name: string
   phone: string
   gender: string
-  // FIX: Changed from undefined to null to match the date function's output
   birthday?: string | null
   anniversary?: string | null
   status?: 'new' | 'duplicate' | 'invalid'
   message?: string
 }
+
+// Helper function to format the date
+const formatDateToMonthDay = (dateString: unknown) => {
+  if (typeof dateString === 'string' && dateString) {
+    // Create a date object, adding 'T00:00:00' to ensure it's parsed in the local timezone
+    const date = new Date(`${dateString}T00:00:00`);
+    // Format to "Month Day", e.g., "February 29"
+    return date.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
+  }
+  return ""; // Return an empty string if the date is not valid
+};
 
 export const columns: ColumnDef<Contact>[] = [
   {
@@ -33,10 +43,12 @@ export const columns: ColumnDef<Contact>[] = [
   {
     accessorKey: "birthday",
     header: "Birthday",
+    cell: ({ row }) => formatDateToMonthDay(row.getValue("birthday")),
   },
   {
     accessorKey: "anniversary",
     header: "Anniversary",
+    cell: ({ row }) => formatDateToMonthDay(row.getValue("anniversary")),
   },
   {
     id: "actions",
